@@ -1,0 +1,7 @@
+pandas
+openpyxl
+telebot
+requests
+python-dotenv
+supabase
+apscheduler
