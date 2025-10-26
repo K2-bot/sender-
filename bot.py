@@ -1094,9 +1094,3 @@ if __name__ == "__main__":
     threading.Thread(target=check_new_transactions_loop, daemon=True).start()
     threading.Thread(target=check_new_orders_loop, daemon=True).start()
     threading.Thread(target=smmgen_status_loop, daemon=True).start()
-
-
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "10000")))
-
-
-
