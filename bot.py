@@ -15,6 +15,17 @@ import pandas as pd
 from apscheduler.schedulers.background import BackgroundScheduler
 import schedule
 import time  # needed if you use time.sleep in the loop
+from flask import Flask
+import threading
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "Bot is running!"
+
+def main_bot_loop():
+    # ဒီနေရာမှာ သင့် bot ရဲ့ main code ထည့်ပါ
+    pass
 
 def my_task():
     print("Task running...")
@@ -1086,4 +1097,6 @@ if __name__ == "__main__":
 
 
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "10000")))
+
+
 
