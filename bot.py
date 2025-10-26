@@ -162,15 +162,22 @@ def send_news_to_group(row):
     )
     safe_send(NEWS_GROUP_ID, msg, parse_mode="MarkdownV2")
 
-def update_support_status(id, status, reply_message=None):
-    updates = {"status": status}
-    if reply_message:
-        updates["reply_message"] = reply_message
-        updates["replied_at"] = datetime.utcnow().isoformat()
-    try:
-        safe_execute(lambda: supabase.table("SupportBox").update(updates).eq("id", id).execute())
-    except Exception as e:
-        print("Support update error:", e)
+def poll_supportbox_loop():
+    global last_checked_support
+    while True:
+        try:
+            res = safe_execute(lambda: supabase.table("SupportBox").select("*").order("created_at").execute())
+            rows = res.data or []
+            for row in rows:
+                created = try_parse_iso(row.get("created_at")) or datetime.utcnow()
+                if row.get("status") == "Pending" and (not last_checked_support or created > last_checked_support):
+                    send_news_to_group(row)
+                    last_checked_support = max(last_checked_support or created, created)
+        except Exception as e:
+            print("SupportBox polling error:", e)
+            traceback.print_exc()
+        time.sleep(5)
+
 
 @bot.message_handler(commands=['Answer'])
 def handle_answer(message):
