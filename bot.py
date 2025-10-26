@@ -3,57 +3,23 @@ import re
 import time
 import threading
 import requests
+import traceback
+import pandas as pd
+import dateutil.parser
 from datetime import datetime
 from zoneinfo import ZoneInfo
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
 from dotenv import load_dotenv
 from supabase import create_client, Client
 import telebot
-import dateutil.parser
-import traceback
-import pandas as pd
 from apscheduler.schedulers.background import BackgroundScheduler
-import schedule
-import time  # needed if you use time.sleep in the loop
-from flask import Flask
-import threading
-app = Flask(__name__)
-
-@app.route('/')
-def home():
-    return "Bot is running!"
-
-def main_bot_loop():
-    # ဒီနေရာမှာ သင့် bot ရဲ့ main code ထည့်ပါ
-    pass
-
-def my_task():
-    print("Task running...")
-
-schedule.every(5).seconds.do(my_task)
-
-while True:
-    schedule.run_pending()
-    time.sleep(1)
-
-
-# Optional imports for better exception handling (httpx / httpcore used by supabase client)
-try:
-    import httpx
-    import httpcore
-except Exception:
-    httpx = None
-    httpcore = None
 
 # ---------------------------
 # CONFIG
 # ---------------------------
+load_dotenv()
 TZ = ZoneInfo("Asia/Yangon")
 
-def now_yangon():
-    return datetime.now(TZ)
-
-load_dotenv()
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 BOT_TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -63,52 +29,46 @@ K2BOOST_GROUP_ID = int(os.getenv("K2BOOST_GROUP_ID", "0"))
 GROUP_ID = int(os.getenv("GROUP_ID", "0"))
 REPORT_GROUP_ID = int(os.getenv("REPORT_GROUP_ID", "0"))
 SMMGEN_API_KEY = os.getenv("SMMGEN_API_KEY")
-SMMGEN_URL = "https://smmgen.com/api/v2"
+SMMGEN_URL = os.getenv("SMMGEN_URL", "https://smmgen.com/api/v2")
 USD_TO_MMK = float(os.getenv("USD_TO_MMK", "4500"))
 
 if not (SUPABASE_URL and SUPABASE_KEY and BOT_TOKEN):
     raise RuntimeError("Please provide SUPABASE_URL, SUPABASE_KEY and TELEGRAM_TOKEN in .env")
 
-# --- Fixed Supabase client ---
-supabase: Client = create_client(
-    SUPABASE_URL,
-    SUPABASE_KEY
-)
-
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 bot = telebot.TeleBot(BOT_TOKEN, parse_mode="Markdown")
-app = Flask(__name__)
 db_lock = threading.Lock()
-
-last_checked_support = None
+app = Flask(__name__)
+scheduler = BackgroundScheduler(timezone="UTC")
 
 # ---------------------------
-# UTIL: escape markdown
+# UTIL / HELPERS
+# ---------------------------
 _escape_re = re.compile(r'([_*[\]()~`>#+\-=|{}.!])')
+
+def now_yangon():
+    return datetime.now(TZ)
+
+def iso_now():
+    return datetime.utcnow().isoformat()
 
 def escape_markdown(text: str) -> str:
     if text is None:
         return ""
     return _escape_re.sub(r'\\\1', str(text))
 
-# ---------------------------
-# HELPER WRAPPERS
+def try_parse_iso(s):
+    try:
+        return dateutil.parser.isoparse(s) if s else None
+    except Exception:
+        return None
+
 def is_transient_exception(e: Exception) -> bool:
-    # Handle WinError 10035
-    if isinstance(e, OSError) and getattr(e, "winerror", None) == 10035:
-        return True
-    # httpx/ httpcore RemoteProtocolError or ConnectionTerminated
     name = type(e).__name__
     msg = str(e).lower()
-    if "remoteprotocolerror" in name.lower() or "connectionterminated" in msg or "remote protocol error" in msg:
-        return True
-    # common network errors
     if isinstance(e, requests.exceptions.RequestException):
         return True
-    if httpx and isinstance(e, httpx.RemoteProtocolError):
-        return True
-    if httpcore and isinstance(e, httpcore.RemoteProtocolError):
-        return True
-    for k in ("connection reset", "broken pipe", "connection aborted", "timed out", "timeout"):
+    for k in ("connection reset", "broken pipe", "connection aborted", "timed out", "timeout", "remote protocol error"):
         if k in msg:
             return True
     return False
@@ -150,34 +110,36 @@ def safe_request(method, url, retries=3, timeout=25, **kwargs):
 
 def safe_send(chat_id, text, parse_mode="HTML", disable_web_page_preview=True):
     def _send():
-        bot.send_message(
-            chat_id,
-            text,
-            disable_web_page_preview=disable_web_page_preview,
-            parse_mode=parse_mode
-        )
+        bot.send_message(chat_id, text, disable_web_page_preview=disable_web_page_preview, parse_mode=parse_mode)
     try:
         safe_execute(_send, retries=4, base_delay=0.5)
     except Exception as e:
         print("Telegram send error:", e)
 
-def iso_now():
-    return datetime.utcnow().isoformat()
-
-def try_parse_iso(s):
+def update_user_balance(email, amount):
     try:
-        return dateutil.parser.isoparse(s) if s else None
-    except Exception:
-        return None
-
+        with db_lock:
+            user = safe_execute(lambda: supabase.table("users").select("balance_usd").eq("email", email).execute())
+            if not user or not getattr(user, "data", None):
+                print("No user for", email)
+                return False
+            bal = float(user.data[0].get("balance_usd") or 0)
+            new = bal + float(amount)
+            safe_execute(lambda: supabase.table("users").update({"balance_usd": new}).eq("email", email).execute())
+        return True
+    except Exception as e:
+        print("Balance update error:", e)
+        traceback.print_exc()
+        return False
 
 # ---------------------------
-# PART 1: SUPPORT BOX
-# --------------------------
+# SUPPORT BOX
+# ---------------------------
+last_checked_support = None
+
 def escape_md2(text):
-    # Escape all MarkdownV2 special characters
-    escape_chars = r"_*[]()~`>#+-=|{}.!\\"
-    return ''.join(f'\\{c}' if c in escape_chars else c for c in text)
+    escape_chars = r"_*[]()~`>#+-=|{}.!\\"  # used for MarkdownV2 escaping of content
+    return ''.join(f'\\{c}' if c in escape_chars else c for c in (text or ""))
 
 def send_news_to_group(row):
     id_ = escape_md2(str(row.get("id") or ""))
@@ -186,13 +148,12 @@ def send_news_to_group(row):
     order_id = escape_md2(str(row.get("order_id") or ""))
     message = escape_md2(str(row.get("message") or ""))
 
-    # Escape dashes in your template text
     msg = (
         "📢 *New Support Ticket*\n"
-        f"📦 ID \- {id_}\n"
-        f"📧 Email \- {email}\n"
-        f"📝 Subject \- {subject}\n"
-        f"🆔 Order ID \- {order_id}\n\n"
+        f"📦 ID - {id_}\n"
+        f"📧 Email - {email}\n"
+        f"📝 Subject - {subject}\n"
+        f"🆔 Order ID - {order_id}\n\n"
         "💬 Message:\n"
         f"{message}\n\n"
         "Commands:\n"
@@ -200,11 +161,6 @@ def send_news_to_group(row):
         f"/Close {id_}"
     )
     safe_send(NEWS_GROUP_ID, msg, parse_mode="MarkdownV2")
-
-
-
-
-
 
 def update_support_status(id, status, reply_message=None):
     updates = {"status": status}
@@ -259,24 +215,8 @@ def poll_supportbox_loop():
         time.sleep(5)
 
 # ---------------------------
-# PART 2: AFFILIATE
+# AFFILIATE
 # ---------------------------
-def update_user_balance(email, amount):
-    try:
-        with db_lock:
-            user = safe_execute(lambda: supabase.table("users").select("balance_usd").eq("email", email).execute())
-            if not user or not getattr(user, "data", None):
-                print("No user for", email)
-                return False
-            bal = float(user.data[0].get("balance_usd") or 0)
-            new = bal + float(amount)
-            safe_execute(lambda: supabase.table("users").update({"balance_usd": new}).eq("email", email).execute())
-        return True
-    except Exception as e:
-        print("Balance update error:", e)
-        traceback.print_exc()
-        return False
-
 def handle_affiliate(row):
     email = row.get("email")
     method = row.get("method")
@@ -285,30 +225,21 @@ def handle_affiliate(row):
     phone_id = row.get("phone_id", "N/A")
     name = row.get("name", "N/A")
 
-    # ✅ Affiliate Top-Up (method == topup)
     if method and method.lower() == "topup":
         ok = update_user_balance(email, amount)
         if ok:
-            safe_execute(lambda: supabase.table("affiliate")
-                         .update({"status": "Accepted"})
-                         .eq("id", aff_id)
-                         .execute())
-
-            # 💰 Affiliate Topup confirmation message
+            safe_execute(lambda: supabase.table("affiliate").update({"status": "Accepted"}).eq("id", aff_id).execute())
             msg = (
                 "💰 *Affiliate Topup*\n\n"
                 f"🆔 ID = {aff_id}\n"
                 f"📧 Email = {email}\n"
                 f"💳 Method = {method}\n"
                 f"💵 Amount USD = {amount}\n"
-                f"🇲🇲 Amount MMK = {amount * 4500:,.0f}"
+                f"🇲🇲 Amount MMK = {amount * USD_TO_MMK:,.0f}"
             )
-            safe_send(GROUP_ID, msg)
-        else:
-            print(f"Balance update failed for {email}")
+            safe_send(GROUP_ID, msg, parse_mode="MarkdownV2")
         return
 
-    # 🆕 New affiliate request message
     msg = (
         "🆕 *New Affiliate Request*\n\n"
         f"🆔 ID = {aff_id}\n"
@@ -321,8 +252,8 @@ def handle_affiliate(row):
         f"/Accept {aff_id}\n"
         f"/Failed {aff_id}"
     )
-    safe_send(GROUP_ID, msg)
-    
+    safe_send(GROUP_ID, msg, parse_mode="MarkdownV2")
+
 def check_affiliate_rows_loop():
     last_id = 0
     while True:
@@ -365,7 +296,7 @@ def failed_aff_cmd(message):
         bot.reply_to(message, f"⚠️ Error: {e}")
 
 # ---------------------------
-# PART 3: TRANSACTIONS
+# TRANSACTIONS
 # ---------------------------
 def format_unverified_tx_message(tx):
     return (
@@ -401,18 +332,10 @@ def handle_transaction(tx):
             vp_id = vp.data[0]["id"]
             ok = update_user_balance(email, amount)
             if ok:
-                safe_execute(lambda: supabase.table("VerifyPayment")
-                    .update({"status": "used"})
-                    .eq("id", vp_id)
-                    .execute()
-                )
-                safe_execute(lambda: supabase.table("transactions")
-                    .update({"status": "Accepted"})
-                    .eq("id", record_id)
-                    .execute()
-                )
+                safe_execute(lambda: supabase.table("VerifyPayment").update({"status": "used"}).eq("id", vp_id).execute())
+                safe_execute(lambda: supabase.table("transactions").update({"status": "Accepted"}).eq("id", record_id).execute())
                 usd = float(amount)
-                mmk = usd * 4500
+                mmk = usd * USD_TO_MMK
                 msg = (
                     "✅ Auto Top-up Completed\n"
                     f"👤 User = {email}\n"
@@ -421,16 +344,12 @@ def handle_transaction(tx):
                     f"🇲🇲 Amount MMK = {mmk:.0f}\n"
                     f"🧾 Transaction ID = {txid}"
                 )
-                safe_send(GROUP_ID, msg)
+                safe_send(GROUP_ID, msg, parse_mode="HTML")
             else:
                 print("Could not top-up user balance for", email)
         else:
-            safe_execute(lambda: supabase.table("transactions")
-                .update({"status": "Unverified"})
-                .eq("id", record_id)
-                .execute()
-            )
-            safe_send(GROUP_ID, format_unverified_tx_message(tx))
+            safe_execute(lambda: supabase.table("transactions").update({"status": "Unverified"}).eq("id", record_id).execute())
+            safe_send(GROUP_ID, format_unverified_tx_message(tx), parse_mode="MarkdownV2")
     except Exception as e:
         print("handle_transaction error:", e)
         traceback.print_exc()
@@ -447,6 +366,7 @@ def check_new_transactions_loop():
             traceback.print_exc()
             time.sleep(2)
         time.sleep(5)
+
 @bot.message_handler(commands=['Yes'])
 def approve_tx_cmd(message):
     try:
@@ -458,7 +378,6 @@ def approve_tx_cmd(message):
         ok = update_user_balance(tx.get("email"), tx.get("amount"))
         if ok:
             supabase.table("transactions").update({"status":"Accepted"}).eq("id", tx_id).execute()
-            # mark verifypayment as used if matching transaction_id exists
             supabase.table("VerifyPayment").update({"status":"used"}).eq("transaction_id", tx.get("transaction_id")).execute()
             bot.send_message(GROUP_ID, f"✅ Transaction {tx_id} approved")
         else:
@@ -474,43 +393,27 @@ def reject_tx_cmd(message):
         bot.send_message(GROUP_ID, f"❌ Transaction {tx_id} rejected")
     except Exception as e:
         bot.reply_to(message, f"⚠️ Error: {e}")
-        # -------------------
-# /Use Command Handler
-# -------------------
+
 @bot.message_handler(commands=['Use'])
 def use_verifypayment_cmd(message):
     try:
-        # /Use transaction_id
         parts = message.text.split()
         if len(parts) < 2:
             return bot.reply_to(message, "⚠️ Usage: /Use <transaction_id>")
-
         txid = parts[1]
-
-        # Verify if transaction exists and unused
-        vp_res = supabase.table("VerifyPayment")\
-            .select("*")\
-            .eq("transaction_id", txid)\
-            .eq("status", "unused")\
-            .execute()
-
+        vp_res = supabase.table("VerifyPayment").select("*").eq("transaction_id", txid).eq("status", "unused").execute()
         if not vp_res.data:
             return bot.reply_to(message, f"⚠️ No unused VerifyPayment found for Transaction ID: {txid}")
-
         vp_id = vp_res.data[0]["id"]
-
-        # Update VerifyPayment to used
         supabase.table("VerifyPayment").update({"status":"used"}).eq("id", vp_id).execute()
-
         bot.send_message(GROUP_ID, f"✅ VerifyPayment Transaction {txid} marked as USED")
-
     except Exception as e:
         bot.reply_to(message, f"⚠️ Error: {e}")
+
 # ---------------------------
-# PART 4: WEBSITE ORDERS (SEND + POLL + BOOKKEEPING)
+# WEBSITE ORDERS + SMMGEN
 # ---------------------------
 def send_to_smmgen(order):
-    """Send order to SMMGEN API with retries"""
     payload = {
         "key": SMMGEN_API_KEY,
         "action": "add",
@@ -518,155 +421,72 @@ def send_to_smmgen(order):
         "link": order.get("link"),
         "quantity": order.get("quantity")
     }
-
     if order.get("comments"):
         payload["comments"] = ",".join(order["comments"])
-
     try:
         r = safe_request("POST", SMMGEN_URL, data=payload, timeout=20)
         data = r.json()
     except Exception as e:
         print("send_to_smmgen request error:", e)
         return {"success": False, "error": str(e)}
-
     if isinstance(data, dict) and "order" in data:
         return {"success": True, "order_id": data["order"]}
     else:
         return {"success": False, "error": data}
 
-
 def check_new_orders_loop():
     while True:
         try:
-            # Pending orders ရှာ
-            res = safe_execute(lambda: supabase.table("WebsiteOrders")
-                                .select("*")
-                                .eq("status", "Pending")
-                                .execute())
+            res = safe_execute(lambda: supabase.table("WebsiteOrders").select("*").eq("status", "Pending").execute())
             orders = res.data or []
-
             for o in orders:
                 if o.get("supplier_name") == "smmgen":
-                    # SMMGEN API ကို call
                     result = send_to_smmgen(o)
                     if result.get("success"):
-                        # Supabase update
                         safe_execute(lambda: supabase.table("WebsiteOrders").update({
                             "status": "Processing",
                             "supplier_order_id": str(result["order_id"])
                         }).eq("id", o["id"]).execute())
-
-                        # Telegram notify
-                        msg = f"""
-🚀 <b>New Order to SMMGEN</b>
-
-🆔 <code>{o.get('id')}</code>
-📦 Service: {o.get('service')}
-🔢 Quantity: {o.get('quantity')}
-🔗 Link: {o.get('link')}
-👤 Email: {o.get('email')}
-👤 Order Id: {str(result['order_id'])}
-✅ Status: Processing
-"""
+                        msg = (
+                            f"🚀 <b>New Order to SMMGEN</b>\n\n"
+                            f"🆔 <code>{o.get('id')}</code>\n"
+                            f"📦 Service: {o.get('service')}\n"
+                            f"🔢 Quantity: {o.get('quantity')}\n"
+                            f"🔗 Link: {o.get('link')}\n"
+                            f"👤 Email: {o.get('email')}\n"
+                            f"👤 Order Id: {str(result['order_id'])}\n"
+                            f"✅ Status: Processing\n"
+                        )
                         safe_send(SUPPLIER_GROUP_ID, msg, parse_mode="HTML")
-
                 elif o.get("supplier_name") == "k2boost":
-                    # K2BOOST order notify
-                    msg = f"""
-⚡️ <b>New Order to K2BOOST</b>
-
-🆔 <code>{o.get('id')}</code>
-📧 Email: {o.get('email')}
-📦 Service: {o.get('service')}
-🔢 Quantity: {o.get('quantity')}
-🔗 Link: {o.get('link')}
-📆 Day: {o.get('day')}
-⏳ Remain: {o.get('remain')}
-💰 Sell Charge: {o.get('sell_charge')}
-🏷 Supplier: {o.get('supplier_name')}
-🕒 Created: {o.get('created_at')}
-💬 Used Type: {o.get('UsedType')}
-"""
+                    msg = (
+                        f"⚡️ <b>New Order to K2BOOST</b>\n\n"
+                        f"🆔 <code>{o.get('id')}</code>\n"
+                        f"📧 Email: {o.get('email')}\n"
+                        f"📦 Service: {o.get('service')}\n"
+                        f"🔢 Quantity: {o.get('quantity')}\n"
+                        f"🔗 Link: {o.get('link')}\n"
+                        f"📆 Day: {o.get('day')}\n"
+                        f"⏳ Remain: {o.get('remain')}\n"
+                        f"💰 Sell Charge: {o.get('sell_charge')}\n"
+                        f"🏷 Supplier: {o.get('supplier_name')}\n"
+                        f"🕒 Created: {o.get('created_at')}\n"
+                        f"💬 Used Type: {o.get('UsedType')}\n"
+                    )
                     safe_send(K2BOOST_GROUP_ID, msg, parse_mode="HTML")
-
-                    # Supabase update
-                    safe_execute(lambda: supabase.table("WebsiteOrders").update({
-                        "status": "Processing"
-                    }).eq("id", o["id"]).execute())
-
+                    safe_execute(lambda: supabase.table("WebsiteOrders").update({"status": "Processing"}).eq("id", o["id"]).execute())
         except Exception as e:
             print("check_new_orders_loop error:", e)
             traceback.print_exc()
-            time.sleep(2)  # error ပြန်ရင် wait 2s
+        time.sleep(3)
 
-        time.sleep(3)  # polling 3s
-
-
-# ✅ Admin Command: Mark Completed
-@bot.message_handler(commands=['D'])
-def admin_mark_completed(message):
-    try:
-        parts = message.text.split()
-        if len(parts) < 2:
-            return bot.reply_to(message, "Usage: /D <OrderID>")
-        order_id = int(parts[1])
-        cur = supabase.table("WebsiteOrders").select("*").eq("id", order_id).execute()
-        if not cur.data:
-            return bot.reply_to(message, "Order not found.")
-        order = cur.data[0]
-        old_status = order.get("status")
-
-        supabase.table("WebsiteOrders").update({
-            "status": "Completed",
-            "completed_at": datetime.utcnow().isoformat()
-        }).eq("id", order_id).execute()
-
-        bot.reply_to(message, f"✅ Order {order_id} marked as Completed")
-
-        try:
-            adjust_service_qty_on_status_change(order, old_status, "Completed")
-        except Exception as e:
-            print("adjust_service_qty_on_status_change error:", e)
-    except Exception as e:
-        bot.reply_to(message, f"⚠️ Error: {e}")
-
-
-# ❌ Admin Command: Mark Failed / Canceled
-@bot.message_handler(commands=['F'])
-def admin_mark_failed(message):
-    try:
-        parts = message.text.split()
-        if len(parts) < 2:
-            return bot.reply_to(message, "Usage: /F <OrderID>")
-        order_id = int(parts[1])
-        cur = supabase.table("WebsiteOrders").select("*").eq("id", order_id).execute()
-        if not cur.data:
-            return bot.reply_to(message, "Order not found.")
-        order = cur.data[0]
-        old_status = order.get("status")
-
-        supabase.table("WebsiteOrders").update({"status": "Canceled"}).eq("id", order_id).execute()
-        bot.reply_to(message, f"❌ Order {order_id} marked as Canceled")
-
-        try:
-            adjust_service_qty_on_status_change(order, old_status, "Canceled")
-        except Exception as e:
-            print("adjust_service_qty_on_status_change error:", e)
-    except Exception as e:
-        bot.reply_to(message, f"⚠️ Error: {e}")
-# ---------------------------
 def find_service_for_order(order):
-    # Try multiple matching strategies
-    svc = None
     try:
-        # 2) Try matching by service name
         svc_name = order.get("service")
         if svc_name:
             r = supabase.table("services").select("*").eq("service_name", svc_name).execute()
             if r.data:
                 return r.data[0]
-        # 3) fallback: try partial match (not efficient but best-effort)
-        if svc_name:
             rows = supabase.table("services").select("*").ilike("service_name", f"%{svc_name}%").limit(1).execute()
             if rows.data:
                 return rows.data[0]
@@ -675,16 +495,6 @@ def find_service_for_order(order):
     return None
 
 def adjust_service_qty_on_status_change(order, old_status, new_status):
-    """
-    - Completed: services.total_sold_qty += qty, users.total_spend += sell_charge
-      + Referral Owner withdrawable_balance += 4%
-      + User bonus if total_spend > $10: +1%
-    - Completed → Partial / Canceled: services.total_sold_qty -= qty, users.total_spend -= proportional
-      - Referral Owner withdrawable_balance -= 4%
-      - User bonus rollback if total_spend > $10: -1%
-    - Partial / Canceled (not previously completed): services.total_sold_qty += (qty - remain), refund proportional
-    - Sends detailed notifications to Telegram groups
-    """
     try:
         old = (old_status or "").lower()
         new = (new_status or "").lower()
@@ -700,9 +510,6 @@ def adjust_service_qty_on_status_change(order, old_status, new_status):
             return
         svc_id = svc.get("id")
 
-        # -----------------
-        # Helper functions
-        # -----------------
         def notify_supplier(title, refund_amount=0, spend_amount=0, done_qty=0):
             msg = (
                 f"📦 <b>{title}</b>\n"
@@ -718,20 +525,14 @@ def adjust_service_qty_on_status_change(order, old_status, new_status):
                 f"🔄 New Status: {new.capitalize()}\n"
                 f"🕒 Time: {datetime.now(ZoneInfo('Asia/Yangon')).strftime('%Y-%m-%d %H:%M:%S')}"
             )
-            safe_send(SUPPLIER_GROUP_ID, msg)
-            safe_send(GROUP_ID, msg)  # Main Telegram group notification
+            safe_send(SUPPLIER_GROUP_ID, msg, parse_mode="HTML")
+            safe_send(GROUP_ID, msg, parse_mode="HTML")
 
         def handle_referral_and_bonus(amount, add=True):
-            """
-            add=True: increase reward/bonus
-            add=False: decrease reward/bonus
-            """
             user_data = supabase.table("users").select("ref_owner_id", "total_spend").eq("email", email).execute().data
             if not user_data:
                 return
             user_info = user_data[0]
-
-            # Referral Owner reward
             ref_owner = user_info.get("ref_owner_id")
             if ref_owner:
                 delta = amount * 0.04
@@ -740,8 +541,6 @@ def adjust_service_qty_on_status_change(order, old_status, new_status):
                 current_withdraw = supabase.table("users").select("withdrawable_balance").eq("id", ref_owner).execute().data[0].get("withdrawable_balance") or 0
                 supabase.table("users").update({"withdrawable_balance": current_withdraw + delta}).eq("id", ref_owner).execute()
                 safe_send(GROUP_ID, f"💰 Referral Owner reward {'added' if add else 'deducted'}: ${delta:.4f} for ref_owner_id {ref_owner}")
-
-            # User bonus if total_spend > 10$
             total_spend = float(user_info.get("total_spend") or 0)
             if total_spend > 10:
                 bonus = amount * 0.01
@@ -750,114 +549,68 @@ def adjust_service_qty_on_status_change(order, old_status, new_status):
                 update_user_balance(email, bonus)
                 safe_send(GROUP_ID, f"🎁 User bonus {'added' if add else 'deducted'}: ${bonus:.4f} for {email}")
 
-        # -----------------
-        # Completed
-        # -----------------
         if new == "completed" and old != "completed":
             cur_qty = int(svc.get("total_sold_qty") or 0)
             supabase.table("services").update({"total_sold_qty": cur_qty + qty}).eq("id", svc_id).execute()
-
             if email and sell_price:
                 user = supabase.table("users").select("total_spend").eq("email", email).execute().data
                 if user:
                     total_spend = float(user[0].get("total_spend") or 0) + sell_price
                     supabase.table("users").update({"total_spend": total_spend}).eq("email", email).execute()
-
-            # Referral/bonus
             handle_referral_and_bonus(sell_price, add=True)
-
             notify_supplier("✅ Completed Order", refund_amount=0, spend_amount=sell_price, done_qty=qty)
-            print(f"✅ Order {order.get('id')} Completed: +{qty} sold_qty, +${sell_price:.2f} total_spend")
 
-        # -----------------
-        # Completed → Partial / Canceled
-        # -----------------
         elif old == "completed" and new in ("partial", "canceled", "cancelled"):
             cur_qty = int(svc.get("total_sold_qty") or 0)
             supabase.table("services").update({"total_sold_qty": max(0, cur_qty - qty)}).eq("id", svc_id).execute()
-
             if email and qty and sell_price:
                 refund_amount = (remain / qty) * sell_price if remain else sell_price
                 user = supabase.table("users").select("total_spend").eq("email", email).execute().data
                 if user:
                     total_spend = float(user[0].get("total_spend") or 0) - refund_amount
                     supabase.table("users").update({"total_spend": max(0, total_spend)}).eq("email", email).execute()
-
                 update_user_balance(email, refund_amount)
-                supabase.table("WebsiteOrders").update({
-                    "refund_amount": refund_amount,
-                    "status": "Refunded"
-                }).eq("id", order.get("id")).execute()
-
-                # Referral/bonus rollback
+                supabase.table("WebsiteOrders").update({"refund_amount": refund_amount, "status": "Refunded"}).eq("id", order.get("id")).execute()
                 handle_referral_and_bonus(refund_amount, add=False)
-
                 notify_supplier("♻️ Completed → Refunded", refund_amount=refund_amount, done_qty=0)
-                safe_send(GROUP_ID, f"🔁 Refunded ${refund_amount:.4f} to {email} for order {order.get('id')} (remain {remain})")
+                safe_send(GROUP_ID, f"🔁 Refunded ${refund_amount:.4f} to {email} for order {order.get('id')} (remain {remain})", parse_mode="HTML")
 
-            print(f"♻️ Order {order.get('id')} {new.capitalize()}: -{qty} sold_qty, -${refund_amount:.2f} refunded")
-
-        # -----------------
-        # Partial / Canceled (not previously completed)
-        # -----------------
         elif new in ("partial", "canceled", "cancelled") and old not in ("completed", "partial", "canceled", "cancelled"):
             done_qty = max(0, qty - remain)
             cur_qty = int(svc.get("total_sold_qty") or 0)
             supabase.table("services").update({"total_sold_qty": cur_qty + done_qty}).eq("id", svc_id).execute()
-
             if qty > 0 and sell_price > 0:
                 refund_amount = (sell_price / qty) * remain
                 spend_amount = sell_price - refund_amount
-
                 user = supabase.table("users").select("total_spend").eq("email", email).execute().data
                 if user:
                     total_spend = float(user[0].get("total_spend") or 0) + spend_amount
                     supabase.table("users").update({"total_spend": total_spend}).eq("email", email).execute()
-
                 update_user_balance(email, refund_amount)
-                supabase.table("WebsiteOrders").update({
-                    "refund_amount": refund_amount,
-                    "status": "Refunded"
-                }).eq("id", order.get("id")).execute()
-
+                supabase.table("WebsiteOrders").update({"refund_amount": refund_amount, "status": "Refunded"}).eq("id", order.get("id")).execute()
                 notify_supplier("💸 Partial/Canceled Order", refund_amount=refund_amount, spend_amount=spend_amount, done_qty=done_qty)
-                safe_send(GROUP_ID, f"💸 {email} refunded ${refund_amount:.4f} for {service_name} (remain {remain})")
-
-                print(f"✅ Partial/Canceled handled: +{done_qty} sold_qty, refund ${refund_amount:.2f}")
-
+                safe_send(GROUP_ID, f"💸 {email} refunded ${refund_amount:.4f} for {service_name} (remain {remain})", parse_mode="HTML")
     except Exception as e:
         print("adjust_service_qty_on_status_change error:", e)
         traceback.print_exc()
 
-# -------------------
-# SMMGEN status poller (lightweight: only not-yet-Completed)
-# -------------------
 def smmgen_status_loop():
     while True:
         try:
-            rows = supabase.table("WebsiteOrders")\
-                .select("*")\
-                .eq("supplier_name","smmgen")\
-                .not_.is_("supplier_order_id", None)\
-                .neq("status", "Completed")\
-                .execute()
-
-            for r in rows.data or []:
+            rows = supabase.table("WebsiteOrders").select("*").eq("supplier_name","smmgen").not_.is_("supplier_order_id", None).neq("status", "Completed").execute().data or []
+            for r in rows:
                 oid = r.get("supplier_order_id")
                 if not oid:
                     continue
-
                 payload = {"key": SMMGEN_API_KEY, "action": "status", "orders": str(oid)}
                 try:
                     resp = requests.post(SMMGEN_URL, data=payload, timeout=25).json()
                 except Exception as e:
                     print("SMMGEN status request error:", e)
                     continue
-
                 info = resp.get(str(oid)) or resp.get(oid) or resp
                 if not info:
                     continue
-
                 new_status = info.get("status")
                 updates = {}
                 if "remains" in info:
@@ -871,45 +624,22 @@ def smmgen_status_loop():
                     except: pass
                 if new_status:
                     updates["status"] = new_status
-
                 if updates:
-                    # Old order fetch
                     cur = supabase.table("WebsiteOrders").select("*").eq("supplier_order_id", str(oid)).execute()
-                    old_order = cur.data[0] if cur.data else {}
+                    old_order = cur.data[0] if cur and cur.data else {}
                     old_status = old_order.get("status", "")
-
-                    # Update Supabase
                     supabase.table("WebsiteOrders").update(updates).eq("supplier_order_id", str(oid)).execute()
-
-                    # Status change logic
                     if new_status and old_status.lower() != new_status.lower():
                         adjust_service_qty_on_status_change(old_order, old_status, new_status)
-
-                        # Telegram notification
                         msg = f"✅ Order #{oid} Status Changed\n🕒 Old: {old_status}\n🚀 New: {new_status}"
                         bot.send_message(SUPPLIER_GROUP_ID, msg)
-
         except Exception as e:
             print("smmgen_status_loop error:", e)
-
-        # 60 seconds interval
         time.sleep(60)
 
-def daily_completed_check():
-    try:
-        rows = supabase.table("WebsiteOrders")\
-            .select("*")\
-            .eq("supplier_name","smmgen")\
-            .eq("status","Completed")\
-            .execute()
-
-        for order in rows.data or []:
-            adjust_service_qty_on_status_change(order, old_status="processing", new_status="completed")
-    except Exception as e:
-        print("daily_completed_check error:", e)
-# -------------------
-# MAIN PROFIT CALCULATION
-# -------------------
+# ---------------------------
+# PROFIT CALCULATION
+# ---------------------------
 def calculate_profit():
     try:
         services_res = safe_execute(lambda: supabase.table("services").select("*").gt("total_sold_qty", 0).execute())
@@ -927,11 +657,9 @@ def calculate_profit():
             sell_price = float(s.get("sell_price") or 0)
             buy_price = float(s.get("buy_price") or 0)
             qty = int(s.get("total_sold_qty") or 0)
-
             profit_usd = (sell_price - buy_price) * qty
             profit_mmk = profit_usd * USD_TO_MMK
             total_profit_usd += profit_usd
-
             profit_rows.append({
                 "Service Name": service_name,
                 "Quantity": qty,
@@ -940,7 +668,6 @@ def calculate_profit():
                 "Profit (USD)": round(profit_usd, 2),
                 "Profit (MMK)": round(profit_mmk, 0)
             })
-
             service_lines.append(
                 f"{idx}. {service_name}\n"
                 f"   • Qty: {qty}\n"
@@ -976,121 +703,135 @@ def calculate_profit():
             "✅ Total sold quantities reset to 0."
         )
 
-        # send message (split if > 4000 chars)
         if len(summary_text) > 4000:
             parts = [summary_text[i:i+4000] for i in range(0, len(summary_text), 4000)]
             for part in parts:
-                safe_send(REPORT_GROUP_ID, part)
+                safe_send(REPORT_GROUP_ID, part, parse_mode="MarkdownV2")
         else:
-            safe_send(REPORT_GROUP_ID, summary_text)
+            safe_send(REPORT_GROUP_ID, summary_text, parse_mode="MarkdownV2")
 
-        # send excel
         try:
             with open(report_filename, "rb") as doc:
                 bot.send_document(REPORT_GROUP_ID, doc)
         except Exception as e:
             print("Failed to send report file:", e)
 
-        # reset totals
         for s in services:
             safe_execute(lambda sid=s["id"]: supabase.table("services").update({"total_sold_qty": 0}).eq("id", sid).execute())
 
     except Exception as e:
         print("calculate_profit error:", e)
         traceback.print_exc()
-        safe_send(REPORT_GROUP_ID, f"⚠️ Profit calculation failed:\n{escape_markdown(str(e))}")
+        safe_send(REPORT_GROUP_ID, f"⚠️ Profit calculation failed:\n{escape_markdown(str(e))}", parse_mode="MarkdownV2")
 
-
-# -------------------
-# TELEGRAM COMMAND
-# -------------------
 @bot.message_handler(commands=["calculate", "Calculate"])
 def manual_calculate(message):
     if message.chat.id == REPORT_GROUP_ID:
-        calculate_profit()
+        threading.Thread(target=calculate_profit, daemon=True).start()
     else:
         bot.reply_to(message, "❌ This command is only for the report group.")
 
-
+# ---------------------------
+# SMMGEN RATE CHECK
+# ---------------------------
 def check_smmgen_service_rates():
     try:
-        # 1️⃣ Supabase မှ source='smmgen' rows ရှာ
         res = supabase.table("services").select("*").eq("source", "smmgen").execute()
         services_rows = res.data or []
-
-        # 2️⃣ SMMGEN API က service list ရယူ
-        payload = {
-            "key": SMMGEN_API_KEY,
-            "action": "services"
-        }
-        r = requests.post("https://smmgen.example/api/v2", data=payload, timeout=15)
-        smmgen_services = r.json()  # list of dicts
-
-        # 3️⃣ compare & update
+        payload = {"key": SMMGEN_API_KEY, "action": "services"}
+        r = safe_request("POST", SMMGEN_URL, data=payload, timeout=15)
+        smmgen_services = r.json()
         for row in services_rows:
             service_id = row.get("service_id")
             row_buy_price = float(row.get("buy_price", 0))
-
-            # API မှ service find
-            api_service = next((s for s in smmgen_services if int(s.get("service")) == int(service_id)), None)
+            api_service = next((s for s in smmgen_services if str(s.get("service")) == str(service_id)), None)
             if api_service:
                 api_rate = float(api_service.get("rate", 0))
                 if row_buy_price != api_rate:
-                    # Telegram notify
-                    msg = f"""
-⚠️ <b>SMMGEN Rate Mismatch</b>
-
-🆔 Service Row ID: {row.get('id')}
-📦 Service Name: {row.get('service')}
-💰 Local Buy Price: {row_buy_price}
-💵 SMMGEN API Rate: {api_rate}
-
-✅ Updating local buy_price to API rate...
-"""
+                    msg = (
+                        "⚠️ <b>SMMGEN Rate Mismatch</b>\n\n"
+                        f"🆔 Service Row ID: {row.get('id')}\n"
+                        f"📦 Service Name: {row.get('service')}\n"
+                        f"💰 Local Buy Price: {row_buy_price}\n"
+                        f"💵 SMMGEN API Rate: {api_rate}\n\n"
+                        "✅ Updating local buy_price to API rate..."
+                    )
                     safe_send(GROUP_ID, msg, parse_mode="HTML")
-
-                    # Supabase update
-                    safe_execute(lambda: supabase.table("services").update({
-                        "buy_price": api_rate
-                    }).eq("id", row.get("id")).execute())
-
+                    safe_execute(lambda: supabase.table("services").update({"buy_price": api_rate}).eq("id", row.get("id")).execute())
     except Exception as e:
         print("check_smmgen_service_rates error:", e)
-        import traceback
         traceback.print_exc()
 
+# ---------------------------
+# FLASK ROUTES (web service triggers)
+# ---------------------------
+@app.route("/", methods=["GET"])
+def health():
+    return jsonify({"status": "running", "time": now_yangon().isoformat()})
 
-# Schedule: နေ့လယ် 2:30 PM
-schedule.every().day.at("14:30").do(check_smmgen_service_rates)
+@app.route("/run_all", methods=["GET"])
+def run_all_once():
+    try:
+        threading.Thread(target=poll_supportbox_loop, daemon=True).start()
+        threading.Thread(target=check_affiliate_rows_loop, daemon=True).start()
+        threading.Thread(target=check_new_transactions_loop, daemon=True).start()
+        threading.Thread(target=check_new_orders_loop, daemon=True).start()
+        threading.Thread(target=smmgen_status_loop, daemon=True).start()
+        threading.Thread(target=calculate_profit, daemon=True).start()
+        return jsonify({"status": "started", "note": "background tasks triggered"}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
-# Loop run
-while True:
-    schedule.run_pending()
-    time.sleep(10)
+@app.route("/trigger/supportbox", methods=["GET"])
+def trigger_supportbox():
+    threading.Thread(target=poll_supportbox_loop, daemon=True).start()
+    return jsonify({"status": "supportbox triggered"}), 200
 
-# -------------------
-# AUTO SCHEDULER
-# -------------------
-scheduler = BackgroundScheduler()
-# 2:30 PM Myanmar = 08:00 UTC (adjust as needed)
-scheduler.add_job(calculate_profit, 'cron', hour=8, minute=0)
-scheduler.start()
-print("🕒 Daily Completed check scheduled at 14:30 Myanmar time")
+@app.route("/trigger/affiliates", methods=["GET"])
+def trigger_affiliates():
+    threading.Thread(target=check_affiliate_rows_loop, daemon=True).start()
+    return jsonify({"status": "affiliates triggered"}), 200
+
+@app.route("/trigger/transactions", methods=["GET"])
+def trigger_transactions():
+    threading.Thread(target=check_new_transactions_loop, daemon=True).start()
+    return jsonify({"status": "transactions triggered"}), 200
+
+@app.route("/trigger/orders", methods=["GET"])
+def trigger_orders():
+    threading.Thread(target=check_new_orders_loop, daemon=True).start()
+    return jsonify({"status": "orders triggered"}), 200
+
+@app.route("/trigger/smmgen-status", methods=["GET"])
+def trigger_smmgen_status():
+    threading.Thread(target=smmgen_status_loop, daemon=True).start()
+    return jsonify({"status": "smmgen status triggered"}), 200
+
+@app.route("/trigger/profit", methods=["GET"])
+def trigger_profit():
+    threading.Thread(target=calculate_profit, daemon=True).start()
+    return jsonify({"status": "profit triggered"}), 200
 
 # ---------------------------
-@app.route("/")
-def home():
-    return jsonify({"status": "running"})
-
-def start_bot():
-    print("🤖 Telegram Bot Starting polling...")
+# STARTUP
+# ---------------------------
+def start_bot_polling():
     bot.infinity_polling()
 
-if __name__ == "__main__":
-    print("🚀 Starting All Systems...")
-    threading.Thread(target=start_bot, daemon=True).start()
+def start_background_threads():
     threading.Thread(target=poll_supportbox_loop, daemon=True).start()
     threading.Thread(target=check_affiliate_rows_loop, daemon=True).start()
     threading.Thread(target=check_new_transactions_loop, daemon=True).start()
     threading.Thread(target=check_new_orders_loop, daemon=True).start()
     threading.Thread(target=smmgen_status_loop, daemon=True).start()
+
+if __name__ == "__main__":
+    try:
+        start_background_threads()
+        threading.Thread(target=start_bot_polling, daemon=True).start()
+        scheduler.add_job(calculate_profit, 'cron', hour=8, minute=0)              # 08:00 UTC == 14:30 Yangon (approx)
+        scheduler.add_job(check_smmgen_service_rates, 'cron', hour=8, minute=30)   # run rates check daily ~14:30 Yangon
+        scheduler.start()
+        app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
+    except (KeyboardInterrupt, SystemExit):
+        pass
