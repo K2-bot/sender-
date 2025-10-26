@@ -731,7 +731,7 @@ def adjust_service_qty_on_status_change(order, old_status, new_status):
                 supabase.table("WebsiteOrders").update({"refund_amount": refund_amount, "status": "Refunded"}).eq("id", order.get("id")).execute()
                 handle_referral_and_bonus(refund_amount, add=False)
                 notify_supplier("♻️ Completed → Refunded", refund_amount=refund_amount, done_qty=0)
-                safe_send(GROUP_ID, f"🔁 Refunded ${refund_amount:.4f} to {escape_html(str(email))} for order {escape_html(str(order.get('id')))} (remain {escape_html(str(remain))})", parse_mode="HTML")
+                safe_send(SUPPLIER_GROUP_ID, f"🔁 Refunded ${refund_amount:.4f} to {escape_html(str(email))} for order {escape_html(str(order.get('id')))} (remain {escape_html(str(remain))})", parse_mode="HTML")
 
         elif new in ("partial", "canceled", "cancelled") and old not in ("completed", "partial", "canceled", "cancelled"):
             done_qty = max(0, qty - remain)
@@ -747,7 +747,7 @@ def adjust_service_qty_on_status_change(order, old_status, new_status):
                 update_user_balance(email, refund_amount)
                 supabase.table("WebsiteOrders").update({"refund_amount": refund_amount, "status": "Refunded"}).eq("id", order.get("id")).execute()
                 notify_supplier("💸 Partial/Canceled Order", refund_amount=refund_amount, spend_amount=spend_amount, done_qty=done_qty)
-                safe_send(GROUP_ID, f"💸 {escape_html(str(email))} refunded ${refund_amount:.4f} for {escape_html(str(service_name))} (remain {escape_html(str(remain))})", parse_mode="HTML")
+                safe_send(SUPPLIER_GROUP_ID, f"💸 {escape_html(str(email))} refunded ${refund_amount:.4f} for {escape_html(str(service_name))} (remain {escape_html(str(remain))})", parse_mode="HTML")
     except Exception as e:
         print("adjust_service_qty_on_status_change error:", e)
         traceback.print_exc()
