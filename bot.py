@@ -684,7 +684,7 @@ def adjust_service_qty_on_status_change(order, old_status, new_status):
                 f"🕒 Time: {escape_html(datetime.now(ZoneInfo('Asia/Yangon')).strftime('%Y-%m-%d %H:%M:%S'))}"
             )
             safe_send(SUPPLIER_GROUP_ID, msg, parse_mode="HTML")
-            safe_send(GROUP_ID, msg, parse_mode="HTML")
+
 
         def handle_referral_and_bonus(amount, add=True):
             user_data = supabase.table("users").select("ref_owner_id", "total_spend").eq("email", email).execute().data
