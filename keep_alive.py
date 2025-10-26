@@ -1,15 +1,16 @@
 from flask import Flask
-from threading import Thread
+import threading
 
-app = Flask('')
+app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "I'm alive!"
+    return "Bot is running!"
 
-def run():
-    app.run(host='0.0.0.0', port=8080)
+def main_bot_loop():
+    # ဒီနေရာမှာ သင့် bot ရဲ့ main code ထည့်ပါ
+    pass
 
-def keep_alive():
-    t = Thread(target=run)
-    t.start()
+if __name__ == '__main__':
+    threading.Thread(target=main_bot_loop, daemon=True).start()
+    app.run(host='0.0.0.0', port=10000)
