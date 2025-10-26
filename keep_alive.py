@@ -8,8 +8,7 @@ def home():
     return "Bot is running!"
 
 def main_bot_loop():
-    # ဒီနေရာမှာ သင့် bot ရဲ့ main code ထည့်ပါ
-    pass
+
 
 if __name__ == '__main__':
     threading.Thread(target=main_bot_loop, daemon=True).start()
