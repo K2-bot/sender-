@@ -7,8 +7,6 @@ app = Flask(__name__)
 def home():
     return "Bot is running!"
 
-def main_bot_loop():
-
 
 if __name__ == '__main__':
     threading.Thread(target=main_bot_loop, daemon=True).start()
