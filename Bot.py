@@ -13,6 +13,18 @@ import dateutil.parser
 import traceback
 import pandas as pd
 from apscheduler.schedulers.background import BackgroundScheduler
+import schedule
+import time  # needed if you use time.sleep in the loop
+
+def my_task():
+    print("Task running...")
+
+schedule.every(5).seconds.do(my_task)
+
+while True:
+    schedule.run_pending()
+    time.sleep(1)
+
 
 # Optional imports for better exception handling (httpx / httpcore used by supabase client)
 try:
@@ -347,14 +359,14 @@ def failed_aff_cmd(message):
 def format_unverified_tx_message(tx):
     return (
         "🆕 *New Unverified Transaction*\n\n"
-        f"🆔 ID - {escape_markdown(tx.get('id'))}\n"
-        f"📧 Email - {escape_markdown(tx.get('email'))}\n"
-        f"💳 Method - {escape_markdown(tx.get('method'))}\n"
-        f"💵 Amount USD - {escape_markdown(tx.get('amount'))}\n\n"
-        f"Transaction Id - {escape_markdown(tx.get('transaction_id'))}\n\n"
-        "Admin Commands:\n"
-        f"/Yes {escape_markdown(tx.get('id'))}\n"
-        f"/No {escape_markdown(tx.get('id'))}"
+        f"🆔 ID = {tx.get('id')}\n"
+        f"📧 Email = {tx.get('email')}\n"
+        f"💳 Method = {tx.get('method')}\n"
+        f"💵 Amount USD = {tx.get('amount')}\n\n"
+        f"🧾 Transaction ID = {tx.get('transaction_id')}\n\n"
+        "🛠 *Admin Commands:*\n"
+        f"/Yes {tx.get('id')}\n"
+        f"/No {tx.get('id')}"
     )
 
 def handle_transaction(tx):
@@ -451,6 +463,38 @@ def reject_tx_cmd(message):
         bot.send_message(GROUP_ID, f"❌ Transaction {tx_id} rejected")
     except Exception as e:
         bot.reply_to(message, f"⚠️ Error: {e}")
+        # -------------------
+# /Use Command Handler
+# -------------------
+@bot.message_handler(commands=['Use'])
+def use_verifypayment_cmd(message):
+    try:
+        # /Use transaction_id
+        parts = message.text.split()
+        if len(parts) < 2:
+            return bot.reply_to(message, "⚠️ Usage: /Use <transaction_id>")
+
+        txid = parts[1]
+
+        # Verify if transaction exists and unused
+        vp_res = supabase.table("VerifyPayment")\
+            .select("*")\
+            .eq("transaction_id", txid)\
+            .eq("status", "unused")\
+            .execute()
+
+        if not vp_res.data:
+            return bot.reply_to(message, f"⚠️ No unused VerifyPayment found for Transaction ID: {txid}")
+
+        vp_id = vp_res.data[0]["id"]
+
+        # Update VerifyPayment to used
+        supabase.table("VerifyPayment").update({"status":"used"}).eq("id", vp_id).execute()
+
+        bot.send_message(GROUP_ID, f"✅ VerifyPayment Transaction {txid} marked as USED")
+
+    except Exception as e:
+        bot.reply_to(message, f"⚠️ Error: {e}")
 # ---------------------------
 # PART 4: WEBSITE ORDERS (SEND + POLL + BOOKKEEPING)
 # ---------------------------
@@ -483,17 +527,25 @@ def send_to_smmgen(order):
 def check_new_orders_loop():
     while True:
         try:
-            res = safe_execute(lambda: supabase.table("WebsiteOrders").select("*").eq("status", "Pending").execute())
+            # Pending orders ရှာ
+            res = safe_execute(lambda: supabase.table("WebsiteOrders")
+                                .select("*")
+                                .eq("status", "Pending")
+                                .execute())
             orders = res.data or []
+
             for o in orders:
                 if o.get("supplier_name") == "smmgen":
+                    # SMMGEN API ကို call
                     result = send_to_smmgen(o)
                     if result.get("success"):
+                        # Supabase update
                         safe_execute(lambda: supabase.table("WebsiteOrders").update({
                             "status": "Processing",
                             "supplier_order_id": str(result["order_id"])
                         }).eq("id", o["id"]).execute())
 
+                        # Telegram notify
                         msg = f"""
 🚀 <b>New Order to SMMGEN</b>
 
@@ -502,12 +554,13 @@ def check_new_orders_loop():
 🔢 Quantity: {o.get('quantity')}
 🔗 Link: {o.get('link')}
 👤 Email: {o.get('email')}
-👤 Order Id: {o.get('supplier_order_id')}
+👤 Order Id: {str(result['order_id'])}
 ✅ Status: Processing
-                        """
+"""
                         safe_send(SUPPLIER_GROUP_ID, msg, parse_mode="HTML")
 
                 elif o.get("supplier_name") == "k2boost":
+                    # K2BOOST order notify
                     msg = f"""
 ⚡️ <b>New Order to K2BOOST</b>
 
@@ -519,21 +572,23 @@ def check_new_orders_loop():
 📆 Day: {o.get('day')}
 ⏳ Remain: {o.get('remain')}
 💰 Sell Charge: {o.get('sell_charge')}
-🏷️ Supplier: {o.get('supplier_name')}
+🏷 Supplier: {o.get('supplier_name')}
 🕒 Created: {o.get('created_at')}
 💬 Used Type: {o.get('UsedType')}
 """
                     safe_send(K2BOOST_GROUP_ID, msg, parse_mode="HTML")
 
-                    safe_execute(lambda: supabase.table("WebsiteOrders").update(
-                        {"status": "Processing"}
-                    ).eq("id", o["id"]).execute())
+                    # Supabase update
+                    safe_execute(lambda: supabase.table("WebsiteOrders").update({
+                        "status": "Processing"
+                    }).eq("id", o["id"]).execute())
 
         except Exception as e:
             print("check_new_orders_loop error:", e)
             traceback.print_exc()
-            time.sleep(2)
-        time.sleep(5)
+            time.sleep(2)  # error ပြန်ရင် wait 2s
+
+        time.sleep(3)  # polling 3s
 
 
 # ✅ Admin Command: Mark Completed
@@ -780,6 +835,7 @@ def smmgen_status_loop():
                 oid = r.get("supplier_order_id")
                 if not oid:
                     continue
+
                 payload = {"key": SMMGEN_API_KEY, "action": "status", "orders": str(oid)}
                 try:
                     resp = requests.post(SMMGEN_URL, data=payload, timeout=25).json()
@@ -790,6 +846,7 @@ def smmgen_status_loop():
                 info = resp.get(str(oid)) or resp.get(oid) or resp
                 if not info:
                     continue
+
                 new_status = info.get("status")
                 updates = {}
                 if "remains" in info:
@@ -805,20 +862,28 @@ def smmgen_status_loop():
                     updates["status"] = new_status
 
                 if updates:
+                    # Old order fetch
                     cur = supabase.table("WebsiteOrders").select("*").eq("supplier_order_id", str(oid)).execute()
                     old_order = cur.data[0] if cur.data else {}
-                    old_status = old_order.get("status")
+                    old_status = old_order.get("status", "")
+
+                    # Update Supabase
                     supabase.table("WebsiteOrders").update(updates).eq("supplier_order_id", str(oid)).execute()
-                    if new_status and old_status and new_status.lower() != old_status.lower():
+
+                    # Status change logic
+                    if new_status and old_status.lower() != new_status.lower():
                         adjust_service_qty_on_status_change(old_order, old_status, new_status)
+
+                        # Telegram notification
+                        msg = f"✅ Order #{oid} Status Changed\n🕒 Old: {old_status}\n🚀 New: {new_status}"
+                        bot.send_message(SUPPLIER_GROUP_ID, msg)
+
         except Exception as e:
             print("smmgen_status_loop error:", e)
+
+        # 60 seconds interval
         time.sleep(60)
 
-
-# -------------------
-# Daily Completed Check (1/day cron)
-# -------------------
 def daily_completed_check():
     try:
         rows = supabase.table("WebsiteOrders")\
@@ -831,8 +896,6 @@ def daily_completed_check():
             adjust_service_qty_on_status_change(order, old_status="processing", new_status="completed")
     except Exception as e:
         print("daily_completed_check error:", e)
-
-
 # -------------------
 # MAIN PROFIT CALCULATION
 # -------------------
@@ -937,6 +1000,63 @@ def manual_calculate(message):
     else:
         bot.reply_to(message, "❌ This command is only for the report group.")
 
+
+def check_smmgen_service_rates():
+    try:
+        # 1️⃣ Supabase မှ source='smmgen' rows ရှာ
+        res = supabase.table("services").select("*").eq("source", "smmgen").execute()
+        services_rows = res.data or []
+
+        # 2️⃣ SMMGEN API က service list ရယူ
+        payload = {
+            "key": SMMGEN_API_KEY,
+            "action": "services"
+        }
+        r = requests.post("https://smmgen.example/api/v2", data=payload, timeout=15)
+        smmgen_services = r.json()  # list of dicts
+
+        # 3️⃣ compare & update
+        for row in services_rows:
+            service_id = row.get("service_id")
+            row_buy_price = float(row.get("buy_price", 0))
+
+            # API မှ service find
+            api_service = next((s for s in smmgen_services if int(s.get("service")) == int(service_id)), None)
+            if api_service:
+                api_rate = float(api_service.get("rate", 0))
+                if row_buy_price != api_rate:
+                    # Telegram notify
+                    msg = f"""
+⚠️ <b>SMMGEN Rate Mismatch</b>
+
+🆔 Service Row ID: {row.get('id')}
+📦 Service Name: {row.get('service')}
+💰 Local Buy Price: {row_buy_price}
+💵 SMMGEN API Rate: {api_rate}
+
+✅ Updating local buy_price to API rate...
+"""
+                    safe_send(GROUP_ID, msg, parse_mode="HTML")
+
+                    # Supabase update
+                    safe_execute(lambda: supabase.table("services").update({
+                        "buy_price": api_rate
+                    }).eq("id", row.get("id")).execute())
+
+    except Exception as e:
+        print("check_smmgen_service_rates error:", e)
+        import traceback
+        traceback.print_exc()
+
+
+# Schedule: နေ့လယ် 2:30 PM
+schedule.every().day.at("14:30").do(check_smmgen_service_rates)
+
+# Loop run
+while True:
+    schedule.run_pending()
+    time.sleep(10)
+
 # -------------------
 # AUTO SCHEDULER
 # -------------------
@@ -962,6 +1082,8 @@ if __name__ == "__main__":
     threading.Thread(target=check_affiliate_rows_loop, daemon=True).start()
     threading.Thread(target=check_new_transactions_loop, daemon=True).start()
     threading.Thread(target=check_new_orders_loop, daemon=True).start()
+    threading.Thread(target=smmgen_status_loop, daemon=True).start()
 
 
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "10000")))
+
