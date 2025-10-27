@@ -221,9 +221,12 @@ def poll_supportbox_loop():
             time.sleep(2)
         time.sleep(5)
 
-# ---------------------------
-# AFFILIATE
-# ---------------------------
+def safe_send(chat_id, text, parse_mode=None):
+    try:
+        bot.send_message(chat_id, text, parse_mode=parse_mode)
+    except Exception as e:
+        print("safe_send error:", e)
+        
 def handle_affiliate(row):
     email = row.get("email")
     method = row.get("method")
@@ -237,29 +240,31 @@ def handle_affiliate(row):
         if ok:
             safe_execute(lambda: supabase.table("affiliate").update({"status": "Accepted"}).eq("id", aff_id).execute())
             msg = (
-                "💰 *Affiliate Topup*\n\n"
-                f"🆔 ID = {aff_id}\n"
-                f"📧 Email = {email}\n"
-                f"💳 Method = {method}\n"
-                f"💵 Amount USD = {amount}\n"
-                f"🇲🇲 Amount MMK = {amount * USD_TO_MMK:,.0f}"
+                "💰 Affiliate Topup \n\n"
+                f"🆔 ID = {escape_html(str(aff_id))}\n"
+                f"📧 Email = {escape_html(email)}\n"
+                f"💳 Method = {escape_html(method)}\n"
+                f"💵 Amount USD = {escape_html(str(amount))}\n"
+                f"🇲🇲 Amount MMK = {escape_html(f'{amount * USD_TO_MMK:,.0f}') }"
             )
-            safe_send(GROUP_ID, msg)
+            safe_send(GROUP_ID, msg, parse_mode="HTML")
         return
 
     msg = (
-        "🆕 *New Affiliate Request*\n\n"
-        f"🆔 ID = {aff_id}\n"
-        f"📧 Email = {email}\n"
-        f"💰 Amount = {amount}\n"
-        f"💳 Method = {method}\n"
-        f"📱 Phone ID = {phone_id}\n"
-        f"👤 Name = {name}\n\n"
-        "🛠 *Admin Actions:*\n"
-        f"/Accept {aff_id}\n"
-        f"/Failed {aff_id}"
+        "🆕 New Affiliate Request \n\n"
+        f"🆔 ID = {escape_html(str(aff_id))}\n"
+        f"📧 Email = {escape_html(str(email))}\n"
+        f"💰 Amount = {escape_html(str(amount))}\n"
+        f"💳 Method = {escape_html(str(method))}\n"
+        f"📱 Phone ID = {escape_html(str(phone_id))}\n"
+        f"👤 Name = {escape_html(str(name))}\n\n"
+        f"🇲🇲 Amount MMK = {escape_html(f'{amount * USD_TO_MMK:,.0f}') }"
+        "🛠 <b>Admin Actions:</b>\n"
+        f"/Accept {escape_html(str(aff_id))}\n"
+        f"/Failed {escape_html(str(aff_id))}"
     )
-    safe_send(GROUP_ID, msg)
+    safe_send(GROUP_ID, msg, parse_mode="HTML")
+
 
 def check_affiliate_rows_loop():
     last_id = 0
@@ -275,9 +280,12 @@ def check_affiliate_rows_loop():
             time.sleep(2)
         time.sleep(5)
 
+
 @bot.message_handler(commands=['Accept'])
 def accept_aff_cmd(message):
     try:
+        if not is_admin_chat(message.chat.id):
+            return bot.reply_to(message, "❌ You are not authorized to use this command.")
         aff_id = int(message.text.split()[1])
         row_res = safe_execute(lambda: supabase.table("affiliate").select("*").eq("id", aff_id).execute())
         row = row_res.data if row_res else None
@@ -287,27 +295,32 @@ def accept_aff_cmd(message):
         ok = update_user_balance(row.get("email"), float(row.get("amount") or 0))
         if ok:
             safe_execute(lambda: supabase.table("affiliate").update({"status":"Accepted"}).eq("id", aff_id).execute())
-            bot.send_message(GROUP_ID, f"✅ Affiliate #{aff_id} Accepted")
+            safe_send(GROUP_ID, f"✅ Affiliate #{aff_id} Accepted", parse_mode="HTML")
         else:
             bot.reply_to(message, "⚠️ Could not update balance.")
     except Exception as e:
         bot.reply_to(message, f"⚠️ Error: {e}")
 
+
 @bot.message_handler(commands=['Failed'])
 def failed_aff_cmd(message):
     try:
+        if not is_admin_chat(message.chat.id):
+            return bot.reply_to(message, "❌ You are not authorized to use this command.")
         aff_id = int(message.text.split()[1])
         safe_execute(lambda: supabase.table("affiliate").update({"status":"Failed"}).eq("id", aff_id).execute())
-        bot.send_message(GROUP_ID, f"❌ Affiliate #{aff_id} Failed")
+        safe_send(GROUP_ID, f"❌ Affiliate #{aff_id} Failed", parse_mode="HTML")
     except Exception as e:
         bot.reply_to(message, f"⚠️ Error: {e}")
+
 
 # ---------------------------
 # TRANSACTIONS
 # ---------------------------
-def safe_send(chat_id, text):
+
+def safe_send(chat_id, text, parse_mode=None):
     try:
-        bot.send_message(chat_id, text, parse_mode=None)
+        bot.send_message(chat_id, text, parse_mode=parse_mode)
     except Exception as e:
         print("safe_send error:", e)
 
@@ -463,6 +476,15 @@ def use_verifypayment_cmd(message):
 # ---------------------------
 # WEBSITE ORDERS + SMMGEN
 # ---------------------------
+USD_TO_MMK = 4500  # MMK conversion rate
+
+def safe_send(chat_id, text, parse_mode=None):
+    try:
+        bot.send_message(chat_id, text, parse_mode=parse_mode)
+    except Exception as e:
+        print("safe_send error:", e)
+
+
 def send_to_smmgen(order):
     """Send order to SMMGEN API and handle response/errors safely"""
     payload = {
@@ -482,10 +504,13 @@ def send_to_smmgen(order):
     except Exception as e:
         print("send_to_smmgen request error:", e)
 
-        # Mark order as canceled
+        # Mark order as canceled + default supplier_order_id
         safe_execute(
             lambda: supabase.table("WebsiteOrders")
-            .update({"status": "Canceled"})
+            .update({
+                "status": "Canceled",
+                "supplier_order_id": "123456"
+            })
             .eq("id", order["id"])
             .execute()
         )
@@ -503,6 +528,7 @@ def send_to_smmgen(order):
             f"ID: {order.get('id')}\n"
             f"Email: {order.get('email')}\n"
             f"Error: {str(e)}",
+            parse_mode="HTML"
         )
 
         return {"success": False, "error": str(e)}
@@ -514,10 +540,13 @@ def send_to_smmgen(order):
     else:
         print("send_to_smmgen response error:", data)
 
-        # Mark order as canceled
+        # Mark order as canceled + default supplier_order_id
         safe_execute(
             lambda: supabase.table("WebsiteOrders")
-            .update({"status": "Canceled"})
+            .update({
+                "status": "Canceled",
+                "supplier_order_id": "123456"
+            })
             .eq("id", order["id"])
             .execute()
         )
@@ -528,29 +557,22 @@ def send_to_smmgen(order):
         except Exception as err:
             print("adjust_service_qty_on_status_change error:", err)
 
-        # Notify admin group
+        # Notify supplier group
         safe_send(
             SUPPLIER_GROUP_ID,
             f"⚠️ SMMGEN API Response Error\n"
             f"ID: {order.get('id')}\n"
             f"Email: {order.get('email')}\n"
             f"Response: {json.dumps(data, ensure_ascii=False)}",
+            parse_mode="HTML"
         )
 
         return {"success": False, "error": data}
 
 
-def safe_send(chat_id, text):
-    try:
-        bot.send_message(chat_id, text, parse_mode=None)
-    except Exception as e:
-        print("safe_send error:", e)
-
-
 def check_new_orders_loop():
     while True:
         try:
-            # ✅ Pending ဖြစ်တဲ့ Orders တွေကိုသာယူမယ်
             res = safe_execute(
                 lambda: supabase.table("WebsiteOrders")
                 .select("*")
@@ -564,25 +586,22 @@ def check_new_orders_loop():
                 supplier_order_id = o.get("supplier_order_id")
                 supplier_name = o.get("supplier_name")
 
-                # ❌ Rejected / Refunded ဖြစ်ရင် မတင်ပါ
                 if status in ["refunded", "canceled"]:
                     continue
 
-                # ❌ supplier_order_id ရှိပြီးသားဆိုရင် SKIP
-                if supplier_order_id:
+                # ❌ supplier_order_id ရှိပြီးသားဆိုရင် SKIP (SMMGEN case only)
+                if supplier_name == "smmgen" and supplier_order_id:
                     continue
 
-                # ✅ smmgen ကိုပို့မယ့် order များ
+                # ✅ smmgen orders
                 if supplier_name == "smmgen":
                     result = send_to_smmgen(o)
                     if result.get("success"):
-                        safe_execute(
-                            lambda: supabase.table("WebsiteOrders")
-                            .update(
-                                {
-                                    "status": "Processing",
-                                    "supplier_order_id": str(result["order_id"]),}
-                            )
+                        safe_execute(lambda: supabase.table("WebsiteOrders")
+                            .update({
+                                "status": "Processing",
+                                "supplier_order_id": str(result["order_id"])
+                            })
                             .eq("id", o["id"])
                             .execute()
                         )
@@ -592,14 +611,15 @@ def check_new_orders_loop():
                             f"📦 Service: {o.get('service')}\n"
                             f"🔢 Quantity: {o.get('quantity')}\n"
                             f"🔗 Link: {o.get('link')}\n"
-                            f"💰 Sell Charge: {o.get('sell_charge')}\n"
+                            f"💰 Sell Charge (USD): {o.get('sell_charge')}\n"
+                            f"💵 Sell Charge (MMK): {o.get('sell_charge') * USD_TO_MMK:,.0f}\n"
                             f"📧 Email: {o.get('email')}\n"
                             f"🧾 Supplier Order ID: {result['order_id']}\n"
                             f"✅ Status: Processing"
                         )
-                        safe_send(SUPPLIER_GROUP_ID, msg)
+                        safe_send(SUPPLIER_GROUP_ID, msg, parse_mode="HTML")
 
-                # ✅ K2BOOST ကိုပို့မယ့် order များ
+                # ✅ K2BOOST orders
                 elif supplier_name == "k2boost":
                     msg = (
                         f"⚡️ New Order to K2BOOST\n\n"
@@ -610,12 +630,13 @@ def check_new_orders_loop():
                         f"🔗 Link: {o.get('link')}\n"
                         f"📆 Day: {o.get('day')}\n"
                         f"⏳ Remain: {o.get('remain')}\n"
-                        f"💰 Sell Charge: {o.get('sell_charge')}\n"
+                        f"💰 Sell Charge (USD): {o.get('sell_charge')}\n"
+                        f"💵 Sell Charge (MMK): {o.get('sell_charge') * USD_TO_MMK:,.0f}\n"
                         f"🏷 Supplier: {o.get('supplier_name')}\n"
                         f"🕒 Created: {o.get('created_at')}\n"
                         f"💬 Used Type: {o.get('UsedType')}"
                     )
-                    safe_send(K2BOOST_GROUP_ID, msg)
+                    safe_send(K2BOOST_GROUP_ID, msg, parse_mode="HTML")
 
                     # Update order status
                     safe_execute(
