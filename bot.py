@@ -221,33 +221,6 @@ def poll_supportbox_loop():
             time.sleep(2)
         time.sleep(5)
 
-import os
-import time
-import traceback
-import threading
-from dotenv import load_dotenv
-import telebot
-from supabase import create_client
-
-# ---------------------------
-# CONFIG
-# ---------------------------
-load_dotenv()
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-GROUP_ID = int(os.getenv("GROUP_ID"))  # must include -100 if supergroup
-USD_TO_MMK = float(os.getenv("USD_TO_MMK", 4500))
-
-bot = telebot.TeleBot(BOT_TOKEN)
-
-# Initialize Supabase
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-
-# ---------------------------
-# HELPER FUNCTIONS
-# ---------------------------
-
 def safe_send(chat_id, text, parse_mode=None):
     """Send Telegram message safely and print errors"""
     try:
