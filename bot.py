@@ -573,6 +573,59 @@ def check_new_orders_loop():
             traceback.print_exc()
         time.sleep(3)
 
+@bot.message_handler(commands=['D'])
+def admin_mark_completed(message):
+    try:
+        parts = message.text.split()
+        if len(parts) < 2:
+            return bot.reply_to(message, "Usage: /D <OrderID>")
+        order_id = int(parts[1])
+        cur = supabase.table("WebsiteOrders").select("*").eq("id", order_id).execute()
+        if not cur.data:
+            return bot.reply_to(message, "Order not found.")
+        order = cur.data[0]
+        old_status = order.get("status")
+
+        supabase.table("WebsiteOrders").update({
+            "status": "Completed",
+            "completed_at": datetime.utcnow().isoformat()
+        }).eq("id", order_id).execute()
+
+        bot.reply_to(message, f"✅ Order {order_id} marked as Completed")
+
+        try:
+            adjust_service_qty_on_status_change(order, old_status, "Completed")
+        except Exception as e:
+            print("adjust_service_qty_on_status_change error:", e)
+    except Exception as e:
+        bot.reply_to(message, f"⚠️ Error: {e}")
+
+
+@bot.message_handler(commands=['F'])
+def admin_mark_failed(message):
+    try:
+        parts = message.text.split()
+        if len(parts) < 2:
+            return bot.reply_to(message, "Usage: /F <OrderID>")
+        order_id = int(parts[1])
+        cur = supabase.table("WebsiteOrders").select("*").eq("id", order_id).execute()
+        if not cur.data:
+            return bot.reply_to(message, "Order not found.")
+        order = cur.data[0]
+        old_status = order.get("status")
+
+        supabase.table("WebsiteOrders").update({"status": "Canceled"}).eq("id", order_id).execute()
+        bot.reply_to(message, f"❌ Order {order_id} marked as Canceled")
+
+        try:
+            adjust_service_qty_on_status_change(order, old_status, "Canceled")
+        except Exception as e:
+            print("adjust_service_qty_on_status_change error:", e)
+    except Exception as e:
+        bot.reply_to(message, f"⚠️ Error: {e}")
+
+
+
 def find_service_for_order(order):
     try:
         svc_name = order.get("service")
@@ -748,84 +801,47 @@ def calculate_profit():
 
         # Calculate per service profit
         for idx, s in enumerate(services, start=1):
-            service_name = (s.get("service_name", "Unknown"))
+            service_name = s.get("service_name", "Unknown")
             sell_price = float(s.get("sell_price") or 0)
             buy_price = float(s.get("buy_price") or 0)
             qty = int(s.get("total_sold_qty") or 0)
             per_qty = int(s.get("per_quantity") or 1000)
 
-            # ✅ Corrected profit formula (per 1000 or per_quantity base)
+            # ✅ Profit formula (based on per_quantity price)
             profit_usd = ((sell_price - buy_price) / per_qty) * qty
-            profit_mmk = profit_usd * USD_TO_MMK
             total_profit_usd += profit_usd
 
             profit_rows.append({
-                "Service Name": service_name,
-                "Quantity": qty,
-                "Buy Price ($)": buy_price,
-                "Sell Price ($)": sell_price,
-                "Profit (USD)": round(profit_usd, 2),
-                "Profit (MMK)": round(profit_mmk, 0)
+                "Service": service_name,
+                "Sell Price": sell_price,
+                "Buy Price": buy_price,
+                "Qty Sold": qty,
+                "Profit USD": round(profit_usd, 4),
+                "Profit MMK": round(profit_usd * USD_TO_MMK)
             })
 
             service_lines.append(
                 f"{idx}. {service_name}\n"
-                f"   • Qty: {qty}\n"
-                f"   • Buy: ${buy_price:.3f} | Sell: ${sell_price:.3f} (per {per_qty})\n"
-                f"   • Profit: ${profit_usd:.2f} ({profit_mmk:,.0f} Ks)"
+                f"• Sell: ${sell_price:.4f} | Buy: ${buy_price:.4f}\n"
+                f"• Qty: {qty}\n"
+                f"• Profit: ${profit_usd:.4f} ({profit_usd * USD_TO_MMK:,.0f} MMK)\n"
             )
 
-        # Totals
         total_profit_mmk = total_profit_usd * USD_TO_MMK
-        users_res = safe_execute(lambda: supabase.table("users").select("balance_usd").execute())
-        users = users_res.data or []
-        total_balance_usd = sum(float(u.get("balance_usd") or 0) for u in users)
-        total_balance_mmk = total_balance_usd * USD_TO_MMK
-
-        # Save Excel report
-        df = pd.DataFrame(profit_rows)
-        df.loc[len(df.index)] = ["TOTAL", "", "", "", round(total_profit_usd, 2), round(total_profit_mmk, 0)]
-        report_filename = f"./DailyProfitReport_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
-        df.to_excel(report_filename, index=False)
-
-        # Summary text
-        service_report = "\n\n".join(service_lines)
-        summary_text = (
-            "📊 *K2 Daily Profit Report*\n\n"
-            f"💰 *Total Profit:*\n"
-            f"- USD: ${total_profit_usd:.2f}\n"
-            f"- MMK: {total_profit_mmk:,.0f} Ks\n\n"
-            f"👥 *User Balances:*\n"
-            f"- USD: ${total_balance_usd:.2f}\n"
-            f"- MMK: {total_balance_mmk:,.0f} Ks\n\n"
-            "━━━━━━━━━━━━━━━\n"
-            "📦 *Service-wise Profits*\n\n"
-            f"{service_report}\n"
-            "━━━━━━━━━━━━━━━\n"
-            f"🕒 Report Time: {datetime.now().strftime('%I:%M %p, %d-%b-%Y')}\n"
-            "✅ Total sold quantities reset to 0."
+        report_msg = (
+            "📊 <b>Daily Profit Report</b>\n\n"
+            + "\n".join(service_lines)
+            + f"\n💵 <b>Total Profit:</b> ${total_profit_usd:.4f}\n"
+            + f"🇲🇲 <b>Total Profit (MMK):</b> {total_profit_mmk:,.0f}"
         )
 
-        # Telegram message size guard (split long messages)
-        parts = [summary_text[i:i + 3500] for i in range(0, len(summary_text), 3500)]
-        for part in parts:
-            safe_send(REPORT_GROUP_ID, part, parse_mode="Markdown")
-
-        # Send Excel file
-        try:
-            with open(report_filename, "rb") as doc:
-                bot.send_document(REPORT_GROUP_ID, doc)
-        except Exception as e:
-            print("Failed to send report file:", e)
-
-        # Reset totals
-        for s in services:
-            safe_execute(lambda sid=s["id"]: supabase.table("services").update({"total_sold_qty": 0}).eq("id", sid).execute())
+        safe_send(REPORT_GROUP_ID, report_msg, parse_mode="HTML")
+        print("✅ Profit calculation sent successfully.")
 
     except Exception as e:
-        print("calculate_profit error:", e)
+        print("Profit calculation error:", e)
         traceback.print_exc()
-        safe_send(REPORT_GROUP_ID, f"⚠️ Profit calculation failed:\n{(str(e))}", parse_mode="Markdown")
+
 
 
 # Manual trigger command
