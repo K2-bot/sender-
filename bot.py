@@ -365,26 +365,28 @@ def failed_aff_cmd(message):
 # TRANSACTIONS
 # ---------------------------
 
-def format_unverified_tx_message(tx, USD_TO_MMK):
-    # Safely extract and escape fields
-    id_ = escape_md2(str(tx.get('id') or ''))
-    email = escape_md2(str(tx.get('email') or ''))
-    method = escape_md2(str(tx.get('method') or ''))
-    amount = float(tx.get('amount') or 0)
-    txid = escape_md2(str(tx.get('transaction_id') or ''))
+def safe_send(chat_id, text):
+    try:
+        bot.send_message(chat_id, text, parse_mode=None)
+    except Exception as e:
+        print("safe_send error:", e)
 
-    # Calculate MMK equivalent
+def format_unverified_tx_message(tx, USD_TO_MMK=4500):
+    id_ = tx.get('id')
+    email = tx.get('email')
+    method = tx.get('method')
+    amount = float(tx.get('amount') or 0)
+    txid = tx.get('transaction_id')
     amount_mmk = amount * USD_TO_MMK
 
-    # Return formatted message
     return (
-        "🆕 New Unverified Transaction\n\n"
-        f"🆔 ID = `{id_}`\n"
-        f"📧 Email = `{email}`\n"
-        f"💳 Method = `{method}`\n"
-        f"💵 Amount (USD) = `{amount:,.2f}`\n"
-        f"🇲🇲 Amount (MMK) = `{amount_mmk:,.0f}`\n"
-        f"🧾 Transaction ID = `{txid}`\n\n"
+        f"🆕 New Unverified Transaction\n\n"
+        f"🆔 ID = {id_}\n"
+        f"📧 Email = {email}\n"
+        f"💳 Method = {method}\n"
+        f"💵 Amount (USD) = {amount:,.2f}\n"
+        f"🇲🇲 Amount (MMK) = {amount_mmk:,.0f}\n"
+        f"🧾 Transaction ID = {txid}\n\n"
         "🛠 Admin Commands:\n"
         f"/Yes {id_}\n"
         f"/No {id_}"
@@ -1149,6 +1151,7 @@ if __name__ == "__main__":
         app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
     except (KeyboardInterrupt, SystemExit):
         pass
+
 
 
 
