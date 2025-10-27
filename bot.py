@@ -163,7 +163,7 @@ def send_news_to_group(row):
         f"/Answer {id_} [reply message]\n"
         f"/Close {id_}"
     )
-    safe_send(NEWS_GROUP_ID, msg,)
+    safe_send(NEWS_GROUP_ID, msg)
 
 def update_support_status(id, status, reply_message=None):
     updates = {"status": status}
@@ -524,6 +524,12 @@ def send_to_smmgen(order):
         )
 
         return {"success": False, "error": data}
+
+def safe_send(chat_id, text):
+    try:
+        bot.send_message(chat_id, text, parse_mode=None)
+    except Exception as e:
+        print("safe_send error:", e)
 
 def check_new_orders_loop():
     while True:
