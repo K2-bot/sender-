@@ -244,7 +244,7 @@ def handle_affiliate(row):
                 f"💵 Amount USD = {amount}\n"
                 f"🇲🇲 Amount MMK = {amount * USD_TO_MMK:,.0f}"
             )
-            safe_send(GROUP_ID, msg,)
+            safe_send(GROUP_ID, msg)
         return
 
     msg = (
@@ -259,7 +259,7 @@ def handle_affiliate(row):
         f"/Accept {aff_id}\n"
         f"/Failed {aff_id}"
     )
-    safe_send(GROUP_ID, msg,)
+    safe_send(GROUP_ID, msg)
 
 def check_affiliate_rows_loop():
     last_id = 0
