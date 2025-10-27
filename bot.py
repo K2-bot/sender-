@@ -108,13 +108,16 @@ def safe_request(method, url, retries=3, timeout=25, **kwargs):
                 raise
     raise last_exc
 
-def safe_send(chat_id, text, parse_mode="HTML", disable_web_page_preview=True):
-    def _send():
-        bot.send_message(chat_id, text, disable_web_page_preview=disable_web_page_preview, parse_mode=parse_mode)
+def safe_send(chat_id, text, parse_mode=None):
+    """Safely send Telegram messages with optional Markdown/HTML formatting"""
     try:
-        safe_execute(_send, retries=4, base_delay=0.5)
+        if parse_mode:
+            bot.send_message(chat_id, text, parse_mode=parse_mode)
+        else:
+            bot.send_message(chat_id, text)
     except Exception as e:
         print("Telegram send error:", e)
+
 
 def update_user_balance(email, amount):
     try:
@@ -939,6 +942,14 @@ if __name__ == "__main__":
         pass
 
 
+def start_bot():
+    try:
+        print("🤖 Bot polling started...")
+        bot.polling(non_stop=True, timeout=30)
+    except Exception as e:
+        print("Bot polling error:", e)
+        time.sleep(5)
+        start_bot()
 
 
 
