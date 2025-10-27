@@ -913,6 +913,7 @@ def smmgen_status_loop():
 
 def calculate_profit():
     try:
+        # Fetch services with sold quantities
         services_res = safe_execute(lambda: supabase.table("services").select("*").gt("total_sold_qty", 0).execute())
         services = services_res.data or []
         if not services:
@@ -923,14 +924,19 @@ def calculate_profit():
         profit_rows = []
         service_lines = []
 
+        # Calculate per service profit
         for idx, s in enumerate(services, start=1):
-            service_name = s.get("service_name", "Unknown")
+            service_name = (s.get("service_name", "Unknown"))
             sell_price = float(s.get("sell_price") or 0)
             buy_price = float(s.get("buy_price") or 0)
             qty = int(s.get("total_sold_qty") or 0)
-            profit_usd = (sell_price - buy_price) * qty
+            per_qty = int(s.get("per_quantity") or 1000)
+
+            # ✅ Corrected profit formula (per 1000 or per_quantity base)
+            profit_usd = ((sell_price - buy_price) / per_qty) * qty
             profit_mmk = profit_usd * USD_TO_MMK
             total_profit_usd += profit_usd
+
             profit_rows.append({
                 "Service Name": service_name,
                 "Quantity": qty,
@@ -939,24 +945,28 @@ def calculate_profit():
                 "Profit (USD)": round(profit_usd, 2),
                 "Profit (MMK)": round(profit_mmk, 0)
             })
+
             service_lines.append(
                 f"{idx}. {service_name}\n"
                 f"   • Qty: {qty}\n"
-                f"   • Buy: ${buy_price:.3f} | Sell: ${sell_price:.3f}\n"
+                f"   • Buy: ${buy_price:.3f} | Sell: ${sell_price:.3f} (per {per_qty})\n"
                 f"   • Profit: ${profit_usd:.2f} ({profit_mmk:,.0f} Ks)"
             )
 
+        # Totals
         total_profit_mmk = total_profit_usd * USD_TO_MMK
         users_res = safe_execute(lambda: supabase.table("users").select("balance_usd").execute())
         users = users_res.data or []
         total_balance_usd = sum(float(u.get("balance_usd") or 0) for u in users)
         total_balance_mmk = total_balance_usd * USD_TO_MMK
 
+        # Save Excel report
         df = pd.DataFrame(profit_rows)
         df.loc[len(df.index)] = ["TOTAL", "", "", "", round(total_profit_usd, 2), round(total_profit_mmk, 0)]
         report_filename = f"./DailyProfitReport_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
         df.to_excel(report_filename, index=False)
 
+        # Summary text
         service_report = "\n\n".join(service_lines)
         summary_text = (
             "📊 *K2 Daily Profit Report*\n\n"
@@ -974,33 +984,35 @@ def calculate_profit():
             "✅ Total sold quantities reset to 0."
         )
 
-        # Telegram message size guard: split into chunks and send as plain text (escaped for HTML)
-        parts = [summary_text[i:i+3500] for i in range(0, len(summary_text), 3500)]
+        # Telegram message size guard (split long messages)
+        parts = [summary_text[i:i + 3500] for i in range(0, len(summary_text), 3500)]
         for part in parts:
-            safe_send(REPORT_GROUP_ID, part, parse_mode="HTML")
+            safe_send(REPORT_GROUP_ID, part, parse_mode="Markdown")
 
+        # Send Excel file
         try:
             with open(report_filename, "rb") as doc:
                 bot.send_document(REPORT_GROUP_ID, doc)
         except Exception as e:
             print("Failed to send report file:", e)
 
+        # Reset totals
         for s in services:
             safe_execute(lambda sid=s["id"]: supabase.table("services").update({"total_sold_qty": 0}).eq("id", sid).execute())
 
     except Exception as e:
         print("calculate_profit error:", e)
         traceback.print_exc()
-        safe_send(REPORT_GROUP_ID, f"⚠️ Profit calculation failed:\n{escape_html(str(e))}", parse_mode="HTML")
+        safe_send(REPORT_GROUP_ID, f"⚠️ Profit calculation failed:\n{(str(e))}", parse_mode="Markdown")
 
 
+# Manual trigger command
 @bot.message_handler(commands=["calculate", "Calculate"])
 def manual_calculate(message):
     if message.chat.id == REPORT_GROUP_ID or is_admin_chat(message.chat.id):
         threading.Thread(target=calculate_profit, daemon=True).start()
     else:
         bot.reply_to(message, "❌ This command is only for the report group or admins.")
-
 
 # ---------------------------
 # SMMGEN RATE CHECK
@@ -1137,6 +1149,7 @@ if __name__ == "__main__":
         app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
     except (KeyboardInterrupt, SystemExit):
         pass
+
 
 
 
