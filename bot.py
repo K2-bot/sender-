@@ -179,25 +179,28 @@ def update_user_balance(email, amount):
 
 
 # ---------------------------
-# SUPPORT BOX
-# ---------------------------
+import time
+import traceback
+from datetime import datetime
+
 last_checked_support = None
 
 def escape_md2(text):
-    # Escape all MarkdownV2 special characters
+    """Escape all MarkdownV2 special characters for Telegram"""
     escape_chars = r"_*[]()~`>#+-=|{}.!\\"
-    return ''.join(f'\\{c}' if c in escape_chars else c for c in text)
+    return ''.join(f'\\{c}' if c in escape_chars else c for c in (text or ""))
+
 
 def send_news_to_group(row):
+    """Send a new support ticket to the Telegram group"""
     id_ = escape_md2(str(row.get("id") or ""))
     email_ = escape_md2(str(row.get("email") or ""))
     subject = escape_md2(str(row.get("subject") or ""))
     order_id = escape_md2(str(row.get("order_id") or ""))
     message = escape_md2(str(row.get("message") or ""))
 
-    # Escape dashes in your template text
     msg = (
-        "📢 New Support Ticket \n"
+        "📢 New Support Ticket\n"
         f"📦 ID - {id_}\n"
         f"📧 Email - {email_}\n"
         f"📝 Subject - {subject}\n"
@@ -208,39 +211,56 @@ def send_news_to_group(row):
         f"/Answer {id_} [reply message]\n"
         f"/Close {id_}"
     )
+
+    # Use safe_send, escape MarkdownV2 properly
     safe_send(NEWS_GROUP_ID, msg, parse_mode="MarkdownV2")
 
 
 def update_support_status(id, status, reply_message=None):
+    """Update support ticket status in the database"""
     updates = {"status": status}
     if reply_message:
-        updates["reply_text"] = reply_message  # match your table
+        updates["reply_text"] = reply_message
         updates["replied_at"] = datetime.utcnow().isoformat()
+
     try:
-        safe_execute(lambda: supabase.table("SupportBox")
-                     .update(updates)
-                     .eq("id", id)
-                     .execute())
+        safe_execute(lambda: (
+            supabase.table("SupportBox")
+            .update(updates)
+            .eq("id", id)
+            .execute()
+        ))
     except Exception as e:
         print("Support update error:", e)
 
 
-
 def poll_supportbox_loop():
+    """Continuously poll SupportBox table for new pending tickets"""
     global last_checked_support
+
     while True:
         try:
-            res = safe_execute(lambda: supabase.table("SupportBox").select("*").order("created_at").execute())
+            res = safe_execute(lambda: (
+                supabase.table("SupportBox")
+                .select("*")
+                .order("created_at")
+                .execute()
+            ))
             rows = res.data or []
+
             for row in rows:
                 created = try_parse_iso(row.get("created_at")) or datetime.utcnow()
+
                 if (not last_checked_support or created > last_checked_support) and row.get("status") == "Pending":
                     send_news_to_group(row)
                     last_checked_support = created
+
         except Exception as e:
             print("SupportBox polling error:", e)
             traceback.print_exc()
+
         time.sleep(5)
+
 
 
 # Telegram handlers for support
@@ -850,48 +870,87 @@ def adjust_service_qty_on_status_change(order, old_status, new_status):
 
 
 def smmgen_status_loop():
+    """Periodically check SMMGEN order status and update WebsiteOrders table"""
     while True:
         try:
-            rows = supabase.table("WebsiteOrders").select("*").eq("supplier_name","smmgen").not_.is_("supplier_order_id", None).neq("status", "Completed").execute().data or []
+            # Get all SMMGEN orders with a supplier_order_id and not completed
+            rows = (
+                supabase.table("WebsiteOrders")
+                .select("*")
+                .eq("supplier_name", "smmgen")
+                .not_.is_("supplier_order_id", None)
+                .neq("status", "Completed")
+                .execute()
+                .data
+                or []
+            )
+
             for r in rows:
                 oid = r.get("supplier_order_id")
                 if not oid:
                     continue
+
                 payload = {"key": SMMGEN_API_KEY, "action": "status", "orders": str(oid)}
+
                 try:
                     resp = safe_request("POST", SMMGEN_URL, data=payload, timeout=25).json()
                 except Exception as e:
                     print("SMMGEN status request error:", e)
                     continue
+
+                # SMMGEN response can be keyed by str(oid) or oid itself
                 info = resp.get(str(oid)) or resp.get(oid) or resp
                 if not info:
                     continue
+
                 new_status = info.get("status")
                 updates = {}
+
+                # Update remain, start_count, buy_charge if present
                 if "remains" in info:
-                    try: updates["remain"] = int(float(info["remains"]))
-                    except: pass
+                    try:
+                        updates["remain"] = int(float(info["remains"]))
+                    except Exception:
+                        pass
                 if "start_count" in info:
-                    try: updates["start_count"] = int(float(info["start_count"]))
-                    except: pass
+                    try:
+                        updates["start_count"] = int(float(info["start_count"]))
+                    except Exception:
+                        pass
                 if "charge" in info:
-                    try: updates["buy_charge"] = float(info["charge"])
-                    except: pass
+                    try:
+                        updates["buy_charge"] = float(info["charge"])
+                    except Exception:
+                        pass
                 if new_status:
                     updates["status"] = new_status
+
                 if updates:
+                    # Get old order info
                     cur = supabase.table("WebsiteOrders").select("*").eq("supplier_order_id", str(oid)).execute()
                     old_order = cur.data[0] if cur and cur.data else {}
                     old_status = old_order.get("status", "")
+
+                    # Update DB
                     supabase.table("WebsiteOrders").update(updates).eq("supplier_order_id", str(oid)).execute()
+
+                    # If status changed, adjust quantity and notify
                     if new_status and old_status.lower() != new_status.lower():
                         adjust_service_qty_on_status_change(old_order, old_status, new_status)
-                        msg = f"✅ Order #{escape_html(str(oid))} Status Changed\n🕒 Old: {escape_html(str(old_status))}\n🚀 New: {escape_html(str(new_status))}"
-                        safe_send(SUPPLIER_GROUP_ID, msg, parse_mode="HTML")
+                        msg = (
+                            f"✅ Order #{escape_html(str(oid))} Status Changed\n"
+                            f"🕒 Old: {escape_html(str(old_status))}\n"
+                            f"🚀 New: {escape_html(str(new_status))}"
+                        )
+                        safe_send(SUPPLIER_GROUP_ID, msg)
+
         except Exception as e:
             print("smmgen_status_loop error:", e)
             traceback.print_exc()
+
+        # Check every 60 seconds
         time.sleep(60)
+
 
 
 # ---------------------------
