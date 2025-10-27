@@ -1076,7 +1076,6 @@ def start_background_threads():
     threading.Thread(target=check_new_transactions_loop, daemon=True).start()
     threading.Thread(target=check_new_orders_loop, daemon=True).start()
     threading.Thread(target=smmgen_status_loop, daemon=True).start()
-    bot.polling(none_stop=True)
 
 if __name__ == "__main__":
     try:
