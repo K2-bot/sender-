@@ -163,7 +163,7 @@ def send_news_to_group(row):
         f"/Answer {id_} [reply message]\n"
         f"/Close {id_}"
     )
-    safe_send(NEWS_GROUP_ID, msg, parse_mode="MarkdownV2")
+    safe_send(NEWS_GROUP_ID, msg,)
 
 def update_support_status(id, status, reply_message=None):
     updates = {"status": status}
@@ -244,7 +244,7 @@ def handle_affiliate(row):
                 f"💵 Amount USD = {amount}\n"
                 f"🇲🇲 Amount MMK = {amount * USD_TO_MMK:,.0f}"
             )
-            safe_send(GROUP_ID, msg, parse_mode="MarkdownV2")
+            safe_send(GROUP_ID, msg,)
         return
 
     msg = (
@@ -259,7 +259,7 @@ def handle_affiliate(row):
         f"/Accept {aff_id}\n"
         f"/Failed {aff_id}"
     )
-    safe_send(GROUP_ID, msg, parse_mode="MarkdownV2")
+    safe_send(GROUP_ID, msg,)
 
 def check_affiliate_rows_loop():
     last_id = 0
@@ -539,8 +539,8 @@ def check_new_orders_loop():
                             "supplier_order_id": str(result["order_id"])
                         }).eq("id", o["id"]).execute())
                         msg = (
-                            f"🚀 <b>New Order to SMMGEN</b>\n\n"
-                            f"🆔 <code>{o.get('id')}</code>\n"
+                            f"🚀New Order to SMMGEN\n\n"
+                            f"🆔 {o.get('id')}\n"
                             f"📦 Service: {o.get('service')}\n"
                             f"🔢 Quantity: {o.get('quantity')}\n"
                             f"🔗 Link: {o.get('link')}\n"
@@ -550,11 +550,11 @@ def check_new_orders_loop():
                             f"👤 Order Id: {str(result['order_id'])}\n"
                             f"✅ Status: Processing\n"
                         )
-                        safe_send(SUPPLIER_GROUP_ID, msg, parse_mode="HTML")
+                        safe_send(SUPPLIER_GROUP_ID, msg)
                 elif o.get("supplier_name") == "k2boost":
                     msg = (
-                        f"⚡️ <b>New Order to K2BOOST</b>\n\n"
-                        f"🆔 <code>{o.get('id')}</code>\n"
+                        f"⚡️ New Order to K2BOOST\n\n"
+                        f"🆔 {o.get('id')}\n"
                         f"📧 Email: {o.get('email')}\n"
                         f"📦 Service: {o.get('service')}\n"
                         f"🔢 Quantity: {o.get('quantity')}\n"
@@ -566,7 +566,7 @@ def check_new_orders_loop():
                         f"🕒 Created: {o.get('created_at')}\n"
                         f"💬 Used Type: {o.get('UsedType')}\n"
                     )
-                    safe_send(K2BOOST_GROUP_ID, msg, parse_mode="HTML")
+                    safe_send(K2BOOST_GROUP_ID, msg)
                     safe_execute(lambda: supabase.table("WebsiteOrders").update({"status": "Processing"}).eq("id", o["id"]).execute())
         except Exception as e:
             print("check_new_orders_loop error:", e)
@@ -658,8 +658,8 @@ def adjust_service_qty_on_status_change(order, old_status, new_status):
 
         def notify_supplier(title, refund_amount=0, spend_amount=0, done_qty=0):
             msg = (
-                f"📦 <b>{title}</b>\n"
-                f"🧾 Order ID: <code>{order.get('id')}</code>\n"
+                f"📦 {title}\n"
+                f"🧾 Order ID: {order.get('id')}\n"
                 f"🧩 Service: {service_name}\n"
                 f"👤 User: {email}\n"
                 f"📊 Quantity: {qty}\n"
@@ -671,8 +671,8 @@ def adjust_service_qty_on_status_change(order, old_status, new_status):
                 f"🔄 New Status: {new.capitalize()}\n"
                 f"🕒 Time: {datetime.now(ZoneInfo('Asia/Yangon')).strftime('%Y-%m-%d %H:%M:%S')}"
             )
-            safe_send(SUPPLIER_GROUP_ID, msg, parse_mode="HTML")
-            safe_send(GROUP_ID, msg, parse_mode="HTML")
+            safe_send(SUPPLIER_GROUP_ID, msg)
+
 
         def handle_referral_and_bonus(amount, add=True):
             user_data = supabase.table("users").select("ref_owner_id", "total_spend").eq("email", email).execute().data
@@ -719,7 +719,7 @@ def adjust_service_qty_on_status_change(order, old_status, new_status):
                 supabase.table("WebsiteOrders").update({"refund_amount": refund_amount, "status": "Refunded"}).eq("id", order.get("id")).execute()
                 handle_referral_and_bonus(refund_amount, add=False)
                 notify_supplier("♻️ Completed → Refunded", refund_amount=refund_amount, done_qty=0)
-                safe_send(GROUP_ID, f"🔁 Refunded ${refund_amount:.4f} to {email} for order {order.get('id')} (remain {remain})", parse_mode="HTML")
+                safe_send(GROUP_ID, f"🔁 Refunded ${refund_amount:.4f} to {email} for order {order.get('id')} (remain {remain})", )
 
         elif new in ("partial", "canceled", "cancelled") and old not in ("completed", "partial", "canceled", "cancelled"):
             done_qty = max(0, qty - remain)
@@ -735,7 +735,7 @@ def adjust_service_qty_on_status_change(order, old_status, new_status):
                 update_user_balance(email, refund_amount)
                 supabase.table("WebsiteOrders").update({"refund_amount": refund_amount, "status": "Refunded"}).eq("id", order.get("id")).execute()
                 notify_supplier("💸 Partial/Canceled Order", refund_amount=refund_amount, spend_amount=spend_amount, done_qty=done_qty)
-                safe_send(GROUP_ID, f"💸 {email} refunded ${refund_amount:.4f} for {service_name} (remain {remain})", parse_mode="HTML")
+                safe_send(GROUP_ID, f"💸 {email} refunded ${refund_amount:.4f} for {service_name} (remain {remain})")
     except Exception as e:
         print("adjust_service_qty_on_status_change error:", e)
         traceback.print_exc()
@@ -801,47 +801,84 @@ def calculate_profit():
 
         # Calculate per service profit
         for idx, s in enumerate(services, start=1):
-            service_name = s.get("service_name", "Unknown")
+            service_name = (s.get("service_name", "Unknown"))
             sell_price = float(s.get("sell_price") or 0)
             buy_price = float(s.get("buy_price") or 0)
             qty = int(s.get("total_sold_qty") or 0)
             per_qty = int(s.get("per_quantity") or 1000)
 
-            # ✅ Profit formula (based on per_quantity price)
+            # ✅ Corrected profit formula (per 1000 or per_quantity base)
             profit_usd = ((sell_price - buy_price) / per_qty) * qty
+            profit_mmk = profit_usd * USD_TO_MMK
             total_profit_usd += profit_usd
 
             profit_rows.append({
-                "Service": service_name,
-                "Sell Price": sell_price,
-                "Buy Price": buy_price,
-                "Qty Sold": qty,
-                "Profit USD": round(profit_usd, 4),
-                "Profit MMK": round(profit_usd * USD_TO_MMK)
+                "Service Name": service_name,
+                "Quantity": qty,
+                "Buy Price ($)": buy_price,
+                "Sell Price ($)": sell_price,
+                "Profit (USD)": round(profit_usd, 2),
+                "Profit (MMK)": round(profit_mmk, 0)
             })
 
             service_lines.append(
                 f"{idx}. {service_name}\n"
-                f"• Sell: ${sell_price:.4f} | Buy: ${buy_price:.4f}\n"
-                f"• Qty: {qty}\n"
-                f"• Profit: ${profit_usd:.4f} ({profit_usd * USD_TO_MMK:,.0f} MMK)\n"
+                f"   • Qty: {qty}\n"
+                f"   • Buy: ${buy_price:.3f} | Sell: ${sell_price:.3f} (per {per_qty})\n"
+                f"   • Profit: ${profit_usd:.2f} ({profit_mmk:,.0f} Ks)"
             )
 
+        # Totals
         total_profit_mmk = total_profit_usd * USD_TO_MMK
-        report_msg = (
-            "📊 <b>Daily Profit Report</b>\n\n"
-            + "\n".join(service_lines)
-            + f"\n💵 <b>Total Profit:</b> ${total_profit_usd:.4f}\n"
-            + f"🇲🇲 <b>Total Profit (MMK):</b> {total_profit_mmk:,.0f}"
+        users_res = safe_execute(lambda: supabase.table("users").select("balance_usd").execute())
+        users = users_res.data or []
+        total_balance_usd = sum(float(u.get("balance_usd") or 0) for u in users)
+        total_balance_mmk = total_balance_usd * USD_TO_MMK
+
+        # Save Excel report
+        df = pd.DataFrame(profit_rows)
+        df.loc[len(df.index)] = ["TOTAL", "", "", "", round(total_profit_usd, 2), round(total_profit_mmk, 0)]
+        report_filename = f"./DailyProfitReport_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
+        df.to_excel(report_filename, index=False)
+
+        # Summary text
+        service_report = "\n\n".join(service_lines)
+        summary_text = (
+            "📊 *K2 Daily Profit Report*\n\n"
+            f"💰 *Total Profit:*\n"
+            f"- USD: ${total_profit_usd:.2f}\n"
+            f"- MMK: {total_profit_mmk:,.0f} Ks\n\n"
+            f"👥 *User Balances:*\n"
+            f"- USD: ${total_balance_usd:.2f}\n"
+            f"- MMK: {total_balance_mmk:,.0f} Ks\n\n"
+            "━━━━━━━━━━━━━━━\n"
+            "📦 *Service-wise Profits*\n\n"
+            f"{service_report}\n"
+            "━━━━━━━━━━━━━━━\n"
+            f"🕒 Report Time: {datetime.now().strftime('%I:%M %p, %d-%b-%Y')}\n"
+            "✅ Total sold quantities reset to 0."
         )
 
-        safe_send(REPORT_GROUP_ID, report_msg, parse_mode="HTML")
-        print("✅ Profit calculation sent successfully.")
+        # Telegram message size guard (split long messages)
+        parts = [summary_text[i:i + 3500] for i in range(0, len(summary_text), 3500)]
+        for part in parts:
+            safe_send(REPORT_GROUP_ID, part)
+
+        # Send Excel file
+        try:
+            with open(report_filename, "rb") as doc:
+                bot.send_document(REPORT_GROUP_ID, doc)
+        except Exception as e:
+            print("Failed to send report file:", e)
+
+        # Reset totals
+        for s in services:
+            safe_execute(lambda sid=s["id"]: supabase.table("services").update({"total_sold_qty": 0}).eq("id", sid).execute())
 
     except Exception as e:
-        print("Profit calculation error:", e)
+        print("calculate_profit error:", e)
         traceback.print_exc()
-
+        safe_send(REPORT_GROUP_ID, f"⚠️ Profit calculation failed:\n{(str(e))}")
 
 
 # Manual trigger command
@@ -877,7 +914,7 @@ def check_smmgen_service_rates():
                         f"💵 SMMGEN API Rate: {api_rate}\n\n"
                         "✅ Updating local buy_price to API rate..."
                     )
-                    safe_send(GROUP_ID, msg, parse_mode="HTML")
+                    safe_send(GROUP_ID, msg)
                     safe_execute(lambda: supabase.table("services").update({"buy_price": api_rate}).eq("id", row.get("id")).execute())
     except Exception as e:
         print("check_smmgen_service_rates error:", e)
