@@ -470,7 +470,7 @@ def send_to_smmgen(order):
         "action": "add",
         "service": order.get("supplier_service_id"),
         "link": order.get("link"),
-        "quantity": order.get("quantity")
+        "quantity": order.get("quantity"),
     }
 
     if order.get("comments"):
@@ -483,7 +483,12 @@ def send_to_smmgen(order):
         print("send_to_smmgen request error:", e)
 
         # Mark order as canceled
-        safe_execute(lambda: supabase.table("WebsiteOrders").update({"status": "Canceled"}).eq("id", order["id"]).execute())
+        safe_execute(
+            lambda: supabase.table("WebsiteOrders")
+            .update({"status": "Canceled"})
+            .eq("id", order["id"])
+            .execute()
+        )
 
         # Adjust service quantity
         try:
@@ -497,33 +502,43 @@ def send_to_smmgen(order):
             f"❌ SMMGEN API Request Failed\n"
             f"ID: {order.get('id')}\n"
             f"Email: {order.get('email')}\n"
-            f"Error: {str(e)}"
+            f"Error: {str(e)}",
         )
 
         return {"success": False, "error": str(e)}
 
-    # Handle valid JSON response
+    # ✅ Handle valid JSON response
     if isinstance(data, dict) and "order" in data:
         return {"success": True, "order_id": data["order"]}
 
     else:
         print("send_to_smmgen response error:", data)
-        safe_execute(lambda: supabase.table("WebsiteOrders").update({"status": "Canceled"}).eq("id", order["id"]).execute())
 
+        # Mark order as canceled
+        safe_execute(
+            lambda: supabase.table("WebsiteOrders")
+            .update({"status": "Canceled"})
+            .eq("id", order["id"])
+            .execute()
+        )
+
+        # Adjust quantity
         try:
             adjust_service_qty_on_status_change(order, order.get("status"), "Canceled")
         except Exception as err:
             print("adjust_service_qty_on_status_change error:", err)
 
+        # Notify admin group
         safe_send(
             SUPPLIER_GROUP_ID,
             f"⚠️ SMMGEN API Response Error\n"
             f"ID: {order.get('id')}\n"
             f"Email: {order.get('email')}\n"
-            f"Response: {json.dumps(data, ensure_ascii=False)}"
+            f"Response: {json.dumps(data, ensure_ascii=False)}",
         )
 
         return {"success": False, "error": data}
+
 
 def safe_send(chat_id, text):
     try:
@@ -531,33 +546,61 @@ def safe_send(chat_id, text):
     except Exception as e:
         print("safe_send error:", e)
 
+
 def check_new_orders_loop():
     while True:
         try:
-            res = safe_execute(lambda: supabase.table("WebsiteOrders").select("*").eq("status", "Pending").execute())
+            # ✅ Pending ဖြစ်တဲ့ Orders တွေကိုသာယူမယ်
+            res = safe_execute(
+                lambda: supabase.table("WebsiteOrders")
+                .select("*")
+                .eq("status", "Pending")
+                .execute()
+            )
             orders = res.data or []
+
             for o in orders:
-                if o.get("supplier_name") == "smmgen":
+                status = (o.get("status") or "").lower()
+                supplier_order_id = o.get("supplier_order_id")
+                supplier_name = o.get("supplier_name")
+
+                # ❌ Rejected / Refunded ဖြစ်ရင် မတင်ပါ
+                if status in ["refunded", "canceled"]:
+                    continue
+
+                # ❌ supplier_order_id ရှိပြီးသားဆိုရင် SKIP
+                if supplier_order_id:
+                    continue
+
+                # ✅ smmgen ကိုပို့မယ့် order များ
+                if supplier_name == "smmgen":
                     result = send_to_smmgen(o)
                     if result.get("success"):
-                        safe_execute(lambda: supabase.table("WebsiteOrders").update({
-                            "status": "Processing",
-                            "supplier_order_id": str(result["order_id"])
-                        }).eq("id", o["id"]).execute())
+                        safe_execute(
+                            lambda: supabase.table("WebsiteOrders")
+                            .update(
+                                {
+                                    "status": "Processing",
+                                    "supplier_order_id": str(result["order_id"]),}
+                            )
+                            .eq("id", o["id"])
+                            .execute()
+                        )
                         msg = (
-                            f"🚀New Order to SMMGEN\n\n"
+                            f"🚀 New Order Sent to SMMGEN\n\n"
                             f"🆔 {o.get('id')}\n"
                             f"📦 Service: {o.get('service')}\n"
                             f"🔢 Quantity: {o.get('quantity')}\n"
                             f"🔗 Link: {o.get('link')}\n"
                             f"💰 Sell Charge: {o.get('sell_charge')}\n"
-                            f"🔢 : {o.get('link')}\n"
-                            f"👤 Email: {o.get('email')}\n"
-                            f"👤 Order Id: {str(result['order_id'])}\n"
-                            f"✅ Status: Processing\n"
+                            f"📧 Email: {o.get('email')}\n"
+                            f"🧾 Supplier Order ID: {result['order_id']}\n"
+                            f"✅ Status: Processing"
                         )
                         safe_send(SUPPLIER_GROUP_ID, msg)
-                elif o.get("supplier_name") == "k2boost":
+
+                # ✅ K2BOOST ကိုပို့မယ့် order များ
+                elif supplier_name == "k2boost":
                     msg = (
                         f"⚡️ New Order to K2BOOST\n\n"
                         f"🆔 {o.get('id')}\n"
@@ -570,14 +613,22 @@ def check_new_orders_loop():
                         f"💰 Sell Charge: {o.get('sell_charge')}\n"
                         f"🏷 Supplier: {o.get('supplier_name')}\n"
                         f"🕒 Created: {o.get('created_at')}\n"
-                        f"💬 Used Type: {o.get('UsedType')}\n"
+                        f"💬 Used Type: {o.get('UsedType')}"
                     )
                     safe_send(K2BOOST_GROUP_ID, msg)
-                    safe_execute(lambda: supabase.table("WebsiteOrders").update({"status": "Processing"}).eq("id", o["id"]).execute())
+
+                    # Update order status
+                    safe_execute(
+                        lambda: supabase.table("WebsiteOrders")
+                        .update({"status": "Processing"})
+                        .eq("id", o["id"])
+                        .execute()
+                    )
+
         except Exception as e:
             print("check_new_orders_loop error:", e)
             traceback.print_exc()
-        time.sleep(3)
+            time.sleep(3)
 
 @bot.message_handler(commands=['D'])
 def admin_mark_completed(message):
