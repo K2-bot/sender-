@@ -221,12 +221,70 @@ def poll_supportbox_loop():
             time.sleep(2)
         time.sleep(5)
 
+import os
+import time
+import traceback
+import threading
+from dotenv import load_dotenv
+import telebot
+from supabase import create_client
+
+# ---------------------------
+# CONFIG
+# ---------------------------
+load_dotenv()
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+GROUP_ID = int(os.getenv("GROUP_ID"))  # must include -100 if supergroup
+USD_TO_MMK = float(os.getenv("USD_TO_MMK", 4500))
+
+bot = telebot.TeleBot(BOT_TOKEN)
+
+# Initialize Supabase
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+# ---------------------------
+# HELPER FUNCTIONS
+# ---------------------------
+
 def safe_send(chat_id, text, parse_mode=None):
+    """Send Telegram message safely and print errors"""
     try:
         bot.send_message(chat_id, text, parse_mode=parse_mode)
+        print(f"✅ Sent message to {chat_id}")
     except Exception as e:
-        print("safe_send error:", e)
-        
+        print("❌ safe_send error:", e)
+        traceback.print_exc()
+
+def safe_execute(func):
+    """Wrap Supabase calls safely"""
+    try:
+        return func()
+    except Exception as e:
+        print("❌ Supabase error:", e)
+        traceback.print_exc()
+        return None
+
+def escape_html(text):
+    """Escape HTML characters for Telegram HTML mode"""
+    escape_chars = "&<>"
+    return ''.join(f"&amp;" if c=="&" else f"&lt;" if c=="<" else f"&gt;" if c==">" else c for c in text or "")
+
+def update_user_balance(email, amount):
+    """Dummy function - replace with your logic"""
+    print(f"Updating {email} balance by {amount}")
+    return True
+
+def is_admin_chat(chat_id):
+    """Dummy check - replace with your logic"""
+    # For testing, return True
+    return True
+
+# ---------------------------
+# AFFILIATE HANDLERS
+# ---------------------------
+
 def handle_affiliate(row):
     email = row.get("email")
     method = row.get("method")
@@ -240,58 +298,144 @@ def handle_affiliate(row):
         if ok:
             safe_execute(lambda: supabase.table("affiliate").update({"status": "Accepted"}).eq("id", aff_id).execute())
             msg = (
-                "💰 Affiliate Topup \n\n"
+                "💰 Affiliate Topup\n\n"
                 f"🆔 ID = {escape_html(str(aff_id))}\n"
                 f"📧 Email = {escape_html(email)}\n"
                 f"💳 Method = {escape_html(method)}\n"
-                f"💵 Amount USD = {escape_html(str(amount))}\n"
-                f"🇲🇲 Amount MMK = {escape_html(f'{amount * USD_TO_MMK:,.0f}') }"
+                f"💵 Amount USD = {amount}\n"
+                f"🇲🇲 Amount MMK = {amount * USD_TO_MMK:,.0f}"
             )
             safe_send(GROUP_ID, msg, parse_mode="HTML")
         return
 
     msg = (
-        "🆕 New Affiliate Request \n\n"
+        "🆕 New Affiliate Request\n\n"
         f"🆔 ID = {escape_html(str(aff_id))}\n"
-        f"📧 Email = {escape_html(str(email))}\n"
-        f"💰 Amount = {escape_html(str(amount))}\n"
+        f"📧 Email = {escape_html(email)}\n"
+        f"💰 Amount = {amount}\n"
         f"💳 Method = {escape_html(str(method))}\n"
         f"📱 Phone ID = {escape_html(str(phone_id))}\n"
         f"👤 Name = {escape_html(str(name))}\n\n"
-        f"🇲🇲 Amount MMK = {escape_html(f'{amount * USD_TO_MMK:,.0f}') }"
+        f"🇲🇲 Amount MMK = {amount * USD_TO_MMK:,.0f}\n"
         "🛠 <b>Admin Actions:</b>\n"
-        f"/Accept {escape_html(str(aff_id))}\n"
-        f"/Failed {escape_html(str(aff_id))}"
+        f"/Accept {aff_id}\n"
+        f"/Failed {aff_id}"
     )
     safe_send(GROUP_ID, msg, parse_mode="HTML")
-
 
 def check_affiliate_rows_loop():
     last_id = 0
     while True:
         try:
-            res = safe_execute(lambda: supabase.table("affiliate").select("*").eq("status", "Pending").gt("id", last_id).order("id").execute())
+            res = safe_execute(lambda: supabase.table("affiliate")
+                               .select("*")
+                               .eq("status", "Pending")
+                               .gt("id", last_id)
+                               .order("id")
+                               .execute())
             for row in res.data or []:
                 last_id = row["id"]
                 handle_affiliate(row)
         except Exception as e:
-            print("Affiliate error:", e)
+            print("Affiliate loop error:", e)
             traceback.print_exc()
             time.sleep(2)
         time.sleep(5)
 
+# ---------------------------
+# TRANSACTION HANDLERS
+# ---------------------------
+
+def format_unverified_tx_message(tx):
+    id_ = tx.get('id')
+    email = tx.get('email')
+    method = tx.get('method')
+    amount = float(tx.get('amount') or 0)
+    txid = tx.get('transaction_id')
+    return (
+        f"🆕 New Unverified Transaction\n\n"
+        f"🆔 ID = {id_}\n"
+        f"📧 Email = {email}\n"
+        f"💳 Method = {method}\n"
+        f"💵 Amount USD = {amount:,.2f}\n"
+        f"🇲🇲 Amount MMK = {amount * USD_TO_MMK:,.0f}\n"
+        f"🧾 Transaction ID = {txid}\n\n"
+        "🛠 Admin Commands:\n"
+        f"/Yes {id_}\n"
+        f"/No {id_}"
+    )
+
+def handle_transaction(tx):
+    try:
+        email = tx.get("email")
+        method = tx.get("method")
+        amount = float(tx.get("amount") or 0)
+        txid = tx.get("transaction_id")
+        record_id = tx.get("id")
+
+        vp = safe_execute(lambda: supabase.table("VerifyPayment")
+                          .select("*")
+                          .eq("method", method)
+                          .eq("amount_usd", amount)
+                          .eq("status", "unused")
+                          .eq("transaction_id", txid)
+                          .execute())
+
+        if vp and vp.data:
+            vp_id = vp.data[0]["id"]
+            ok = update_user_balance(email, amount)
+            if ok:
+                safe_execute(lambda: supabase.table("VerifyPayment").update({"status": "used"}).eq("id", vp_id).execute())
+                safe_execute(lambda: supabase.table("transactions").update({"status": "Accepted"}).eq("id", record_id).execute())
+                msg = (
+                    f"✅ Auto Top-up Completed\n"
+                    f"👤 User = {email}\n"
+                    f"💳 Method = {method}\n"
+                    f"💰 Amount USD = {amount}\n"
+                    f"🇲🇲 Amount MMK = {amount * USD_TO_MMK:,.0f}\n"
+                    f"🧾 Transaction ID = {txid}"
+                )
+                safe_send(GROUP_ID, msg)
+            else:
+                print("Could not top-up user balance for", email)
+        else:
+            safe_execute(lambda: supabase.table("transactions").update({"status": "Unverified"}).eq("id", record_id).execute())
+            safe_send(GROUP_ID, format_unverified_tx_message(tx))
+    except Exception as e:
+        print("handle_transaction error:", e)
+        traceback.print_exc()
+
+def check_new_transactions_loop():
+    while True:
+        try:
+            res = safe_execute(lambda: supabase.table("transactions")
+                               .select("*")
+                               .eq("status", "Pending")
+                               .order("id")
+                               .execute())
+            for tx in res.data or []:
+                safe_execute(lambda: supabase.table("transactions").update({"status": "Checking"}).eq("id", tx["id"]).execute())
+                handle_transaction(tx)
+        except Exception as e:
+            print("Transaction loop error:", e)
+            traceback.print_exc()
+            time.sleep(2)
+        time.sleep(5)
+
+# ---------------------------
+# TELEGRAM COMMAND HANDLERS
+# ---------------------------
 
 @bot.message_handler(commands=['Accept'])
 def accept_aff_cmd(message):
+    if not is_admin_chat(message.chat.id):
+        return bot.reply_to(message, "❌ You are not authorized to use this command.")
     try:
-        if not is_admin_chat(message.chat.id):
-            return bot.reply_to(message, "❌ You are not authorized to use this command.")
         aff_id = int(message.text.split()[1])
         row_res = safe_execute(lambda: supabase.table("affiliate").select("*").eq("id", aff_id).execute())
-        row = row_res.data if row_res else None
+        row = row_res.data[0] if row_res and row_res.data else None
         if not row:
             return bot.reply_to(message, "Affiliate not found.")
-        row = row[0]
         ok = update_user_balance(row.get("email"), float(row.get("amount") or 0))
         if ok:
             safe_execute(lambda: supabase.table("affiliate").update({"status":"Accepted"}).eq("id", aff_id).execute())
@@ -301,118 +445,17 @@ def accept_aff_cmd(message):
     except Exception as e:
         bot.reply_to(message, f"⚠️ Error: {e}")
 
-
 @bot.message_handler(commands=['Failed'])
 def failed_aff_cmd(message):
+    if not is_admin_chat(message.chat.id):
+        return bot.reply_to(message, "❌ You are not authorized to use this command.")
     try:
-        if not is_admin_chat(message.chat.id):
-            return bot.reply_to(message, "❌ You are not authorized to use this command.")
         aff_id = int(message.text.split()[1])
         safe_execute(lambda: supabase.table("affiliate").update({"status":"Failed"}).eq("id", aff_id).execute())
         safe_send(GROUP_ID, f"❌ Affiliate #{aff_id} Failed", parse_mode="HTML")
     except Exception as e:
         bot.reply_to(message, f"⚠️ Error: {e}")
 
-
-# ---------------------------
-# TRANSACTIONS
-# ---------------------------
-
-def safe_send(chat_id, text, parse_mode=None):
-    try:
-        bot.send_message(chat_id, text, parse_mode=parse_mode)
-    except Exception as e:
-        print("safe_send error:", e)
-
-def format_unverified_tx_message(tx, USD_TO_MMK=4500):
-    id_ = tx.get('id')
-    email = tx.get('email')
-    method = tx.get('method')
-    amount = float(tx.get('amount') or 0)
-    txid = tx.get('transaction_id')
-    amount_mmk = amount * USD_TO_MMK
-
-    return (
-        f"🆕 New Unverified Transaction\n\n"
-        f"🆔 ID = {id_}\n"
-        f"📧 Email = {email}\n"
-        f"💳 Method = {method}\n"
-        f"💵 Amount (USD) = {amount:,.2f}\n"
-        f"🇲🇲 Amount (MMK) = {amount_mmk:,.0f}\n"
-        f"🧾 Transaction ID = {txid}\n\n"
-        "🛠 Admin Commands:\n"
-        f"/Yes {id_}\n"
-        f"/No {id_}"
-    )
-
-
-def handle_transaction(tx):
-    try:
-        email = tx.get("email")
-        method = tx.get("method")
-        amount = tx.get("amount")
-        txid = tx.get("transaction_id")
-        record_id = tx.get("id")
-
-        vp = safe_execute(lambda: supabase.table("VerifyPayment")
-            .select("*")
-            .eq("method", method)
-            .eq("amount_usd", amount)
-            .eq("status", "unused")
-            .eq("transaction_id", txid)
-            .execute()
-        )
-
-        if vp.data:
-            vp_id = vp.data[0]["id"]
-            ok = update_user_balance(email, amount)
-            if ok:
-                safe_execute(lambda: supabase.table("VerifyPayment")
-                    .update({"status": "used"})
-                    .eq("id", vp_id)
-                    .execute()
-                )
-                safe_execute(lambda: supabase.table("transactions")
-                    .update({"status": "Accepted"})
-                    .eq("id", record_id)
-                    .execute()
-                )
-                usd = float(amount)
-                mmk = usd * 4500
-                msg = (
-                    "✅ Auto Top-up Completed\n"
-                    f"👤 User = {email}\n"
-                    f"💳 Method = {method}\n"
-                    f"💰 Amount USD = {usd}\n"
-                    f"🇲🇲 Amount MMK = {mmk:.0f}\n"
-                    f"🧾 Transaction ID = {txid}"
-                )
-                safe_send(GROUP_ID, msg)
-            else:
-                print("Could not top-up user balance for", email)
-        else:
-            safe_execute(lambda: supabase.table("transactions")
-                .update({"status": "Unverified"})
-                .eq("id", record_id)
-                .execute()
-            )
-            safe_send(GROUP_ID, format_unverified_tx_message(tx))
-    except Exception as e:
-        print("handle_transaction error:", e)
-        traceback.print_exc()
-
-def check_new_transactions_loop():
-    while True:
-        try:
-            res = safe_execute(lambda: supabase.table("transactions").select("*").eq("status","Pending").order("id").execute())
-            for tx in res.data or []:
-                safe_execute(lambda: supabase.table("transactions").update({"status":"Checking"}).eq("id", tx["id"]).execute())
-                handle_transaction(tx)
-        except Exception as e:
-            print("Transaction error:", e)
-            traceback.print_exc()
-            time.sleep(2)
-        time.sleep(5)
         
 @bot.message_handler(commands=['Yes'])
 def approve_tx_cmd(message):
@@ -1060,6 +1103,7 @@ def start_background_threads():
     threading.Thread(target=check_new_transactions_loop, daemon=True).start()
     threading.Thread(target=check_new_orders_loop, daemon=True).start()
     threading.Thread(target=smmgen_status_loop, daemon=True).start()
+    bot.polling(none_stop=True)
 
 if __name__ == "__main__":
     try:
@@ -1073,14 +1117,6 @@ if __name__ == "__main__":
         pass
 
 
-def start_bot():
-    try:
-        print("🤖 Bot polling started...")
-        bot.polling(non_stop=True, timeout=30)
-    except Exception as e:
-        print("Bot polling error:", e)
-        time.sleep(5)
-        start_bot()
 
 
 
