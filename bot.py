@@ -180,30 +180,23 @@ def update_user_balance(email, amount):
 
 
 # ---------------------------
-import time
-import traceback
-from datetime import datetime
-
 last_checked_support = None
 
 def escape_md2(text):
-    """Escape all MarkdownV2 special characters for Telegram"""
-    escape_chars = r"_*[]()~`>#+-=|{}.!\\"
+    escape_chars = r"_*[]()~`>#+-=|{}.!\\"  # used for MarkdownV2 escaping of content
     return ''.join(f'\\{c}' if c in escape_chars else c for c in (text or ""))
 
-
 def send_news_to_group(row):
-    """Send a new support ticket to the Telegram group"""
     id_ = escape_md2(str(row.get("id") or ""))
-    email_ = escape_md2(str(row.get("email") or ""))
+    email = escape_md2(str(row.get("email") or ""))
     subject = escape_md2(str(row.get("subject") or ""))
     order_id = escape_md2(str(row.get("order_id") or ""))
     message = escape_md2(str(row.get("message") or ""))
 
     msg = (
-        "📢 New Support Ticket\n"
+        "📢 *New Support Ticket*\n"
         f"📦 ID - {id_}\n"
-        f"📧 Email - {email_}\n"
+        f"📧 Email - {email}\n"
         f"📝 Subject - {subject}\n"
         f"🆔 Order ID - {order_id}\n\n"
         "💬 Message:\n"
@@ -212,60 +205,22 @@ def send_news_to_group(row):
         f"/Answer {id_} [reply message]\n"
         f"/Close {id_}"
     )
-
-    # Use safe_send, escape MarkdownV2 properly
-safe_send(NEWS_GROUP_ID, msg)  # without parse_mode
-
-
+    safe_send(NEWS_GROUP_ID, msg, parse_mode="MarkdownV2")
 
 def update_support_status(id, status, reply_message=None):
-    """Update support ticket status in the database"""
     updates = {"status": status}
     if reply_message:
-        updates["reply_text"] = reply_message
+        updates["reply_text"] = reply_message  # match your table
         updates["replied_at"] = datetime.utcnow().isoformat()
-
     try:
-        safe_execute(lambda: (
-            supabase.table("SupportBox")
-            .update(updates)
-            .eq("id", id)
-            .execute()
-        ))
+        safe_execute(lambda: supabase.table("SupportBox")
+                     .update(updates)
+                     .eq("id", id)
+                     .execute())
     except Exception as e:
         print("Support update error:", e)
 
 
-def poll_supportbox_loop():
-    """Continuously poll SupportBox table for new pending tickets"""
-    global last_checked_support
-
-    while True:
-        try:
-            res = safe_execute(lambda: (
-                supabase.table("SupportBox")
-                .select("*")
-                .order("created_at")
-                .execute()
-            ))
-            rows = res.data or []
-
-            for row in rows:
-                created = try_parse_iso(row.get("created_at")) or datetime.utcnow()
-
-                if (not last_checked_support or created > last_checked_support) and row.get("status") == "Pending":
-                    send_news_to_group(row)
-                    last_checked_support = created
-
-        except Exception as e:
-            print("SupportBox polling error:", e)
-            traceback.print_exc()
-
-        time.sleep(5)
-
-
-
-# Telegram handlers for support
 @bot.message_handler(commands=['Answer'])
 def handle_answer(message):
     try:
@@ -291,11 +246,26 @@ def handle_close(message):
     except Exception as e:
         bot.reply_to(message, f"⚠️ Error: {e}")
 
+def poll_supportbox_loop():
+    global last_checked_support
+    while True:
+        try:
+            res = safe_execute(lambda: supabase.table("SupportBox").select("*").order("created_at").execute())
+            rows = res.data or []
+            for row in rows:
+                created = try_parse_iso(row.get("created_at")) or datetime.utcnow()
+                if (not last_checked_support or created > last_checked_support) and row.get("status") == "Pending":
+                    send_news_to_group(row)
+                    last_checked_support = created
+        except Exception as e:
+            print("SupportBox polling error:", e)
+            traceback.print_exc()
+            time.sleep(2)
+        time.sleep(5)
 
 # ---------------------------
 # AFFILIATE
 # ---------------------------
-
 def handle_affiliate(row):
     email = row.get("email")
     method = row.get("method")
@@ -309,31 +279,29 @@ def handle_affiliate(row):
         if ok:
             safe_execute(lambda: supabase.table("affiliate").update({"status": "Accepted"}).eq("id", aff_id).execute())
             msg = (
-                "💰 Affiliate Topup \n\n"
-                f"🆔 ID = {escape_html(str(aff_id))}\n"
-                f"📧 Email = {escape_html(email)}\n"
-                f"💳 Method = {escape_html(method)}\n"
-                f"💵 Amount USD = {escape_html(str(amount))}\n"
-                f"🇲🇲 Amount MMK = {escape_html(f'{amount * USD_TO_MMK:,.0f}') }"
+                "💰 *Affiliate Topup*\n\n"
+                f"🆔 ID = {aff_id}\n"
+                f"📧 Email = {email}\n"
+                f"💳 Method = {method}\n"
+                f"💵 Amount USD = {amount}\n"
+                f"🇲🇲 Amount MMK = {amount * USD_TO_MMK:,.0f}"
             )
-            safe_send(GROUP_ID, msg, parse_mode="HTML")
+            safe_send(GROUP_ID, msg, parse_mode="MarkdownV2")
         return
 
     msg = (
-        "🆕 New Affiliate Request \n\n"
-        f"🆔 ID = {escape_html(str(aff_id))}\n"
-        f"📧 Email = {escape_html(str(email))}\n"
-        f"💰 Amount = {escape_html(str(amount))}\n"
-        f"💳 Method = {escape_html(str(method))}\n"
-        f"📱 Phone ID = {escape_html(str(phone_id))}\n"
-        f"👤 Name = {escape_html(str(name))}\n\n"
-        f"🇲🇲 Amount MMK = {escape_html(f'{amount * USD_TO_MMK:,.0f}') }"
-        "🛠 <b>Admin Actions:</b>\n"
-        f"/Accept {escape_html(str(aff_id))}\n"
-        f"/Failed {escape_html(str(aff_id))}"
+        "🆕 *New Affiliate Request*\n\n"
+        f"🆔 ID = {aff_id}\n"
+        f"📧 Email = {email}\n"
+        f"💰 Amount = {amount}\n"
+        f"💳 Method = {method}\n"
+        f"📱 Phone ID = {phone_id}\n"
+        f"👤 Name = {name}\n\n"
+        "🛠 *Admin Actions:*\n"
+        f"/Accept {aff_id}\n"
+        f"/Failed {aff_id}"
     )
-    safe_send(GROUP_ID, msg, parse_mode="HTML")
-
+    safe_send(GROUP_ID, msg, parse_mode="MarkdownV2")
 
 def check_affiliate_rows_loop():
     last_id = 0
@@ -349,12 +317,9 @@ def check_affiliate_rows_loop():
             time.sleep(2)
         time.sleep(5)
 
-
 @bot.message_handler(commands=['Accept'])
 def accept_aff_cmd(message):
     try:
-        if not is_admin_chat(message.chat.id):
-            return bot.reply_to(message, "❌ You are not authorized to use this command.")
         aff_id = int(message.text.split()[1])
         row_res = safe_execute(lambda: supabase.table("affiliate").select("*").eq("id", aff_id).execute())
         row = row_res.data if row_res else None
@@ -364,24 +329,20 @@ def accept_aff_cmd(message):
         ok = update_user_balance(row.get("email"), float(row.get("amount") or 0))
         if ok:
             safe_execute(lambda: supabase.table("affiliate").update({"status":"Accepted"}).eq("id", aff_id).execute())
-            safe_send(GROUP_ID, f"✅ Affiliate #{aff_id} Accepted", parse_mode="HTML")
+            bot.send_message(GROUP_ID, f"✅ Affiliate #{aff_id} Accepted")
         else:
             bot.reply_to(message, "⚠️ Could not update balance.")
     except Exception as e:
         bot.reply_to(message, f"⚠️ Error: {e}")
 
-
 @bot.message_handler(commands=['Failed'])
 def failed_aff_cmd(message):
     try:
-        if not is_admin_chat(message.chat.id):
-            return bot.reply_to(message, "❌ You are not authorized to use this command.")
         aff_id = int(message.text.split()[1])
         safe_execute(lambda: supabase.table("affiliate").update({"status":"Failed"}).eq("id", aff_id).execute())
-        safe_send(GROUP_ID, f"❌ Affiliate #{aff_id} Failed", parse_mode="HTML")
+        bot.send_message(GROUP_ID, f"❌ Affiliate #{aff_id} Failed")
     except Exception as e:
         bot.reply_to(message, f"⚠️ Error: {e}")
-
 
 # ---------------------------
 # TRANSACTIONS
@@ -629,7 +590,12 @@ def check_new_orders_loop():
     """Check WebsiteOrders table for new pending orders"""
     while True:
         try:
-            res = safe_execute(lambda: supabase.table("WebsiteOrders").select("*").eq("status", "Pending").execute())
+            res = safe_execute(lambda: (
+                supabase.table("WebsiteOrders")
+                .select("*")
+                .eq("status", "Pending")
+                .execute()
+            ))
             orders = res.data or []
 
             for o in orders:
@@ -638,49 +604,72 @@ def check_new_orders_loop():
                 sell_charge = float(o.get("sell_charge") or 0)
                 amount_mmk = sell_charge * USD_TO_MMK
 
+                # ---------------------------
+                # ✅ SMMGEN Supplier
+                # ---------------------------
                 if supplier == "smmgen":
                     result = send_to_smmgen(o)
                     if result.get("success"):
-                        safe_execute(lambda: supabase.table("WebsiteOrders").update({
-                            "status": "Processing",
-                            "supplier_order_id": str(result["order_id"])
-                        }).eq("id", order_id).execute())
+                        # update database
+                        safe_execute(lambda: (
+                            supabase.table("WebsiteOrders")
+                            .update({
+                                "status": "Processing",
+                                "supplier_order_id": str(result["order_id"])
+                            })
+                            .eq("id", order_id)
+                            .execute()
+                        ))
 
+                        # send message to group
                         msg = (
-                            f"🚀 New Order to SMMGEN\n"
-                            f"ID: {escape_html(str(order_id))}\n"
-                            f"Service: {escape_html(str(o.get('service')))}\n"
-                            f"Quantity: {escape_html(str(o.get('quantity')))}\n"
-                            f"Link: {escape_html(str(o.get('link')))}\n"
-                            f"Email: {escape_html(str(o.get('email')))}\n"
-                            f"Supplier Order ID: {escape_html(str(result['order_id']))}\n"
-                            f"Sell Charge (USD): {escape_html(str(sell_charge))}\n"
-                            f"Sell Charge (MMK): {escape_html(f'{amount_mmk:,.0f}')}\n"
-                            f"Status: Processing"
+                            f"🚀 <b>New Order to SMMGEN</b>\n\n"
+                            f"🆔 <code>{o.get('id')}</code>\n"
+                            f"📦 <b>Service:</b> {o.get('service')}\n"
+                            f"🔢 <b>Quantity:</b> {o.get('quantity')}\n"
+                            f"🔗 <b>Link:</b> {o.get('link')}\n"
+                            f"💰 <b>Sell Charge:</b> {o.get('sell_charge')} USD (~{amount_mmk:,.0f} MMK)\n"
+                            f"👤 <b>Email:</b> {o.get('email')}\n"
+                            f"🏷 <b>Supplier Order ID:</b> {result['order_id']}\n"
+                            f"✅ <b>Status:</b> Processing"
                         )
-                        # parse_mode optional, remove if safe_send does not support it
-                        safe_send(SUPPLIER_GROUP_ID, msg)
+                        safe_send(SUPPLIER_GROUP_ID, msg, parse_mode="HTML")
 
+                # ---------------------------
+                # ✅ K2BOOST Supplier
+                # ---------------------------
                 elif supplier == "k2boost":
                     msg = (
-                        f"⚡️ New Order to K2BOOST\n"
-                        f"ID: {escape_html(str(order_id))}\n"
-                        f"Email: {escape_html(str(o.get('email')))}\n"
-                        f"Service: {escape_html(str(o.get('service')))}\n"
-                        f"Quantity: {escape_html(str(o.get('quantity')))}\n"
-                        f"Link: {escape_html(str(o.get('link')))}\n"
-                        f"Sell Charge (USD): {escape_html(str(sell_charge))}\n"
-                        f"Sell Charge (MMK): {escape_html(f'{amount_mmk:,.0f}')}\n"
-                        f"Status: Processing"
+                        f"⚡️ <b>New Order to K2BOOST</b>\n\n"
+                        f"🆔 <code>{o.get('id')}</code>\n"
+                        f"📧 <b>Email:</b> {o.get('email')}\n"
+                        f"📦 <b>Service:</b> {o.get('service')}\n"
+                        f"🔢 <b>Quantity:</b> {o.get('quantity')}\n"
+                        f"🔗 <b>Link:</b> {o.get('link')}\n"
+                        f"📆 <b>Day:</b> {o.get('day')}\n"
+                        f"⏳ <b>Remain:</b> {o.get('remain')}\n"
+                        f"💰 <b>Sell Charge:</b> {o.get('sell_charge')} USD (~{amount_mmk:,.0f} MMK)\n"
+                        f"🏷 <b>Supplier:</b> {o.get('supplier_name')}\n"
+                        f"🕒 <b>Created:</b> {o.get('created_at')}\n"
+                        f"💬 <b>Used Type:</b> {o.get('UsedType')}"
                     )
-                    safe_send(K2BOOST_GROUP_ID, msg)
-                    safe_execute(lambda: supabase.table("WebsiteOrders").update({"status": "Processing"}).eq("id", order_id).execute())
+                    safe_send(K2BOOST_GROUP_ID, msg, parse_mode="HTML")
+
+                    # update status
+                    safe_execute(lambda: (
+                        supabase.table("WebsiteOrders")
+                        .update({"status": "Processing"})
+                        .eq("id", order_id)
+                        .execute()
+                    ))
 
         except Exception as e:
-            safe_send(SUPPLIER_GROUP_ID, f"⚠️ Error checking WebsiteOrders: {e}")
-            print("check_new_orders_loop error:", e)
+            err_msg = f"⚠️ Error checking WebsiteOrders: {e}"
+            print(err_msg)
+            safe_send(SUPPLIER_GROUP_ID, err_msg)
 
         time.sleep(3)
+
 
 
 # ===============================
