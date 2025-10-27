@@ -318,7 +318,39 @@ def check_affiliate_rows_loop():
 # ---------------------------
 # TRANSACTION HANDLERS
 # ---------------------------
+def safe_send(chat_id, text, parse_mode=None):
+    """Send Telegram message safely and print errors"""
+    try:
+        bot.send_message(chat_id, text, parse_mode=parse_mode)
+        print(f"✅ Sent message to {chat_id}")
+    except Exception as e:
+        print("❌ safe_send error:", e)
+        traceback.print_exc()
 
+def safe_execute(func):
+    """Wrap Supabase calls safely"""
+    try:
+        return func()
+    except Exception as e:
+        print("❌ Supabase error:", e)
+        traceback.print_exc()
+        return None
+
+def escape_html(text):
+    """Escape HTML characters for Telegram HTML mode"""
+    escape_chars = "&<>"
+    return ''.join(f"&amp;" if c=="&" else f"&lt;" if c=="<" else f"&gt;" if c==">" else c for c in text or "")
+
+def update_user_balance(email, amount):
+    """Dummy function - replace with your logic"""
+    print(f"Updating {email} balance by {amount}")
+    return True
+
+def is_admin_chat(chat_id):
+    """Dummy check - replace with your logic"""
+    # For testing, return True
+    return True
+    
 def format_unverified_tx_message(tx):
     id_ = tx.get('id')
     email = tx.get('email')
