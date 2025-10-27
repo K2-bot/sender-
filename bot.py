@@ -1,3 +1,4 @@
+safe_send(NEWS_GROUP_ID, msg)  # without parse_mode
 import os
 import re
 import time
@@ -213,7 +214,8 @@ def send_news_to_group(row):
     )
 
     # Use safe_send, escape MarkdownV2 properly
-    safe_send(NEWS_GROUP_ID, msg, parse_mode="MarkdownV2")
+safe_send(NEWS_GROUP_ID, msg)  # without parse_mode
+
 
 
 def update_support_status(id, status, reply_message=None):
