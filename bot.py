@@ -305,6 +305,7 @@ def handle_affiliate(row):
         f"💳 Method = {escape_html(str(method))}\n"
         f"📱 Phone ID = {escape_html(str(phone_id))}\n"
         f"👤 Name = {escape_html(str(name))}\n\n"
+        f"🇲🇲 Amount MMK = {escape_html(f'{amount * USD_TO_MMK:,.0f}') }"
         "🛠 <b>Admin Actions:</b>\n"
         f"/Accept {escape_html(str(aff_id))}\n"
         f"/Failed {escape_html(str(aff_id))}"
@@ -364,24 +365,31 @@ def failed_aff_cmd(message):
 # TRANSACTIONS
 # ---------------------------
 
-def format_unverified_tx_message(tx):
-    id_ = escape_md2(str(tx.get('id')))
-    email = escape_md2(str(tx.get('email')))
-    method = escape_md2(str(tx.get('method')))
-    amount = escape_md2(str(tx.get('amount')))
-    txid = escape_md2(str(tx.get('transaction_id')))
-def format_unverified_tx_message(tx):
+def format_unverified_tx_message(tx, USD_TO_MMK):
+    # Safely extract and escape fields
+    id_ = escape_md2(str(tx.get('id') or ''))
+    email = escape_md2(str(tx.get('email') or ''))
+    method = escape_md2(str(tx.get('method') or ''))
+    amount = float(tx.get('amount') or 0)
+    txid = escape_md2(str(tx.get('transaction_id') or ''))
+
+    # Calculate MMK equivalent
+    amount_mmk = amount * USD_TO_MMK
+
+    # Return formatted message
     return (
-        "🆕 *New Unverified Transaction*\n\n"
-        f"🆔 ID = {tx.get('id')}\n"
-        f"📧 Email = {tx.get('email')}\n"
-        f"💳 Method = {tx.get('method')}\n"
-        f"💵 Amount USD = {tx.get('amount')}\n\n"
-        f"🧾 Transaction ID = {tx.get('transaction_id')}\n\n"
-        "🛠 *Admin Commands:*\n"
-        f"/Yes {tx.get('id')}\n"
-        f"/No {tx.get('id')}"
+        "🆕 New Unverified Transaction\n\n"
+        f"🆔 ID = `{id_}`\n"
+        f"📧 Email = `{email}`\n"
+        f"💳 Method = `{method}`\n"
+        f"💵 Amount (USD) = `{amount:,.2f}`\n"
+        f"🇲🇲 Amount (MMK) = `{amount_mmk:,.0f}`\n"
+        f"🧾 Transaction ID = `{txid}`\n\n"
+        "🛠 Admin Commands:\n"
+        f"/Yes {id_}\n"
+        f"/No {id_}"
     )
+
 
 def handle_transaction(tx):
     try:
@@ -510,15 +518,24 @@ def use_verifypayment_cmd(message):
 
     except Exception as e:
         bot.reply_to(message, f"⚠️ Error: {e}")
+
+
 # ---------------------------
 # WEBSITE ORDERS + SMMGEN
 # ---------------------------
 
 import time
 import json
+import traceback
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+# ===============================
+# SMMGEN ORDER HANDLER
+# ===============================
 
 def send_to_smmgen(order):
-    """Send order to SMMGEN API"""
+    """Send order to SMMGEN API and handle response/errors safely"""
     payload = {
         "key": SMMGEN_API_KEY,
         "action": "add",
@@ -531,35 +548,70 @@ def send_to_smmgen(order):
         payload["comments"] = ",".join(order["comments"])
 
     try:
+        # ✅ Send request to SMMGEN
         r = safe_request("POST", SMMGEN_URL, data=payload, timeout=20)
         data = r.json()
     except Exception as e:
-        # ❌ Request Error -> Mark as Canceled
-        safe_execute(lambda: supabase.table("WebsiteOrders").update({
-            "status": "Canceled",
-        }).eq("id", order["id"]).execute())
+        print("send_to_smmgen request error:", e)
 
+        # Mark order as canceled in database
+        safe_execute(lambda: (
+            supabase.table("WebsiteOrders")
+            .update({"status": "Canceled"})
+            .eq("id", order["id"])
+            .execute()
+        ))
+
+        # Adjust service quantity (rollback stock)
+        try:
+            adjust_service_qty_on_status_change(order, order.get("status"), "Canceled")
+        except Exception as err:
+            print("adjust_service_qty_on_status_change error:", err)
+
+        # Notify supplier group
         safe_send(
             SUPPLIER_GROUP_ID,
-            f"❌ SMMGEN API Request Failed\n\n🆔 {order.get('id')}\n📧 {order.get('email')}\n💬 Error: {e}"
+            f"❌ *SMMGEN API Request Failed*\n\n"
+            f"🆔 {order.get('id')}\n"
+            f"📧 {order.get('email')}\n"
+            f"💬 Error: `{str(e)}`"
         )
-        print("send_to_smmgen request error:", e)
+
         return {"success": False, "error": str(e)}
 
+    # ✅ Handle valid JSON response
     if isinstance(data, dict) and "order" in data:
         return {"success": True, "order_id": data["order"]}
+
     else:
-        # ⚠️ Response Error -> Mark as Canceled
-        safe_execute(lambda: supabase.table("WebsiteOrders").update({
-            "status": "Canceled",
-        }).eq("id", order["id"]).execute())
+        print("send_to_smmgen response error:", data)
+
+        safe_execute(lambda: (
+            supabase.table("WebsiteOrders")
+            .update({"status": "Canceled"})
+            .eq("id", order["id"])
+            .execute()
+        ))
+
+        try:
+            adjust_service_qty_on_status_change(order, order.get("status"), "Canceled")
+        except Exception as err:
+            print("adjust_service_qty_on_status_change error:", err)
 
         safe_send(
             SUPPLIER_GROUP_ID,
-            f"⚠️ SMMGEN API Response Error\n\n🆔 {order.get('id')}\n📧 {order.get('email')}\n💬 Response: {json.dumps(data, ensure_ascii=False)}"
+            f"⚠️ *SMMGEN API Response Error*\n\n"
+            f"🆔 {order.get('id')}\n"
+            f"📧 {order.get('email')}\n"
+            f"💬 Response: `{json.dumps(data, ensure_ascii=False)}`"
         )
+
         return {"success": False, "error": data}
 
+
+# ===============================
+# ORDER CHECK LOOP
+# ===============================
 
 def check_new_orders_loop():
     """Check WebsiteOrders table for new pending orders"""
@@ -571,47 +623,43 @@ def check_new_orders_loop():
             for o in orders:
                 supplier = o.get("supplier_name")
                 order_id = o.get("id")
+                sell_charge = float(o.get("sell_charge") or 0)
+                amount_mmk = sell_charge * USD_TO_MMK
 
                 if supplier == "smmgen":
                     result = send_to_smmgen(o)
-
                     if result.get("success"):
-                        # ✅ Update to Processing when success
                         safe_execute(lambda: supabase.table("WebsiteOrders").update({
                             "status": "Processing",
                             "supplier_order_id": str(result["order_id"])
                         }).eq("id", order_id).execute())
 
                         msg = (
-                            "🚀 New Order to SMMGEN\n\n"
-                            f"🆔 {escape_html(str(order_id))}\n"
+                            "🚀 <b>New Order to SMMGEN</b>\n\n"
+                            f"🆔 ID: {escape_html(str(order_id))}\n"
                             f"📦 Service: {escape_html(str(o.get('service')))}\n"
                             f"🔢 Quantity: {escape_html(str(o.get('quantity')))}\n"
                             f"🔗 Link: {escape_html(str(o.get('link')))}\n"
                             f"👤 Email: {escape_html(str(o.get('email')))}\n"
                             f"📋 Supplier Order ID: {escape_html(str(result['order_id']))}\n"
-                            f"✅ Status: Processing\n"
+                            f"💰 Sell Charge (USD): {escape_html(str(sell_charge))}\n"
+                            f"🇲🇲 Sell Charge (MMK): {escape_html(f'{amount_mmk:,.0f}')}\n"
+                            f"✅ Status: Processing"
                         )
                         safe_send(SUPPLIER_GROUP_ID, msg, parse_mode="HTML")
 
                 elif supplier == "k2boost":
                     msg = (
-                        "⚡️ New Order to K2BOOST\n\n"
+                        "⚡️ <b>New Order to K2BOOST</b>\n\n"
                         f"🆔 {escape_html(str(order_id))}\n"
-                        f"📧 Email = {escape_html(str(o.get('email')))}\n"
-                        f"📦 Service: {escape_html(str(o.get('service')))}\n"
+                        f"📧 {escape_html(str(o.get('email')))}\n"
+                        f"📦 {escape_html(str(o.get('service')))}\n"
                         f"🔢 Quantity: {escape_html(str(o.get('quantity')))}\n"
                         f"🔗 Link: {escape_html(str(o.get('link')))}\n"
-                        f"📆 Day: {escape_html(str(o.get('day')))}\n"
-                        f"⏳ Remain: {escape_html(str(o.get('remain')))}\n"
-                        f"💰 Sell Charge: {escape_html(str(o.get('sell_charge')))}\n"
-                        f"🏷 Supplier: {escape_html(str(o.get('supplier_name')))}\n"
-                        f"🕒 Created: {escape_html(str(o.get('created_at')))}\n"
-                        f"💬 Used Type: {escape_html(str(o.get('UsedType')))}\n\n"
-                        f"/D {escape_html(str(order_id))}\n"
-                        f"/F {escape_html(str(order_id))}\n"
+                        f"💰 Sell Charge: {escape_html(str(sell_charge))}\n"
+                        f"🇲🇲 Sell Charge (MMK): {escape_html(f'{amount_mmk:,.0f}')}\n"
+                        f"✅ Status: Processing"
                     )
-
                     safe_send(K2BOOST_GROUP_ID, msg, parse_mode="HTML")
                     safe_execute(lambda: supabase.table("WebsiteOrders")
                         .update({"status": "Processing"})
@@ -624,6 +672,11 @@ def check_new_orders_loop():
             print("check_new_orders_loop error:", e)
 
         time.sleep(3)
+
+
+# ===============================
+# ADMIN COMMANDS
+# ===============================
 
 @bot.message_handler(commands=['D'])
 def admin_mark_completed(message):
@@ -653,7 +706,6 @@ def admin_mark_completed(message):
         bot.reply_to(message, f"⚠️ Error: {e}")
 
 
-# ❌ Admin Command: Mark Failed / Canceled
 @bot.message_handler(commands=['F'])
 def admin_mark_failed(message):
     try:
@@ -677,6 +729,11 @@ def admin_mark_failed(message):
     except Exception as e:
         bot.reply_to(message, f"⚠️ Error: {e}")
 
+
+# ===============================
+# SERVICE + REFERRAL HELPERS
+# ===============================
+
 def find_service_for_order(order):
     try:
         svc_name = order.get("service")
@@ -691,6 +748,40 @@ def find_service_for_order(order):
         print("find_service_for_order error:", e)
     return None
 
+
+def handle_referral_and_bonus(email, amount, add=True):
+    try:
+        user_data = supabase.table("users").select("ref_owner_id", "total_spend").eq("email", email).execute().data
+        if not user_data:
+            return
+
+        user_info = user_data[0]
+        ref_owner_id = user_info.get("ref_owner_id")
+
+        # ✅ Referral reward
+        if ref_owner_id:
+            delta = amount * 0.04 * (1 if add else -1)
+            ref_user = supabase.table("users").select("email", "withdrawable_balance").eq("id", ref_owner_id).execute().data
+            if ref_user:
+                ref_email = ref_user[0].get("email")
+                current_withdraw = float(ref_user[0].get("withdrawable_balance") or 0)
+                supabase.table("users").update({"withdrawable_balance": current_withdraw + delta}).eq("id", ref_owner_id).execute()
+                safe_send(GROUP_ID, f"💰 Referral Owner reward {'added' if add else 'deducted'}: ${delta:.4f} for {escape_html(ref_email)}", parse_mode="HTML")
+
+        # ✅ Spend bonus
+        total_spend = float(user_info.get("total_spend") or 0)
+        if total_spend > 10:
+            bonus = amount * 0.01 * (1 if add else -1)
+            update_user_balance(email, bonus)
+            safe_send(GROUP_ID, f"🎁 User bonus {'added' if add else 'deducted'}: ${bonus:.4f} for {escape_html(email)}", parse_mode="HTML")
+
+    except Exception as e:
+        print("handle_referral_and_bonus error:", e)
+
+
+# ===============================
+# SERVICE QTY ADJUSTMENT
+# ===============================
 
 def adjust_service_qty_on_status_change(order, old_status, new_status):
     try:
@@ -725,28 +816,7 @@ def adjust_service_qty_on_status_change(order, old_status, new_status):
             )
             safe_send(SUPPLIER_GROUP_ID, msg, parse_mode="HTML")
 
-
-        def handle_referral_and_bonus(amount, add=True):
-            user_data = supabase.table("users").select("ref_owner_id", "total_spend").eq("email", email).execute().data
-            if not user_data:
-                return
-            user_info = user_data[0]
-            ref_owner = user_info.get("ref_owner_id")
-            if ref_owner:
-                delta = amount * 0.04
-                if not add:
-                    delta = -delta
-                current_withdraw = supabase.table("users").select("withdrawable_balance").eq("id", ref_owner).execute().data[0].get("withdrawable_balance") or 0
-                supabase.table("users").update({"withdrawable_balance": current_withdraw + delta}).eq("id", ref_owner).execute()
-                safe_send(GROUP_ID, f"💰 Referral Owner reward {'added' if add else 'deducted'}: ${delta:.4f} for ref_owner_id {escape_html(str(ref_owner))}", parse_mode="HTML")
-            total_spend = float(user_info.get("total_spend") or 0)
-            if total_spend > 10:
-                bonus = amount * 0.01
-                if not add:
-                    bonus = -bonus
-                update_user_balance(email, bonus)
-                safe_send(GROUP_ID, f"🎁 User bonus {'added' if add else 'deducted'}: ${bonus:.4f} for {escape_html(str(email))}", parse_mode="HTML")
-
+        # ✅ Status logic
         if new == "completed" and old != "completed":
             cur_qty = int(svc.get("total_sold_qty") or 0)
             supabase.table("services").update({"total_sold_qty": cur_qty + qty}).eq("id", svc_id).execute()
@@ -755,8 +825,8 @@ def adjust_service_qty_on_status_change(order, old_status, new_status):
                 if user:
                     total_spend = float(user[0].get("total_spend") or 0) + sell_price
                     supabase.table("users").update({"total_spend": total_spend}).eq("email", email).execute()
-            handle_referral_and_bonus(sell_price, add=True)
-            notify_supplier("✅ Completed Order", refund_amount=0, spend_amount=sell_price, done_qty=qty)
+            handle_referral_and_bonus(email, sell_price, add=True)
+            notify_supplier("✅ Completed Order", spend_amount=sell_price, done_qty=qty)
 
         elif old == "completed" and new in ("partial", "canceled", "cancelled"):
             cur_qty = int(svc.get("total_sold_qty") or 0)
@@ -769,9 +839,8 @@ def adjust_service_qty_on_status_change(order, old_status, new_status):
                     supabase.table("users").update({"total_spend": max(0, total_spend)}).eq("email", email).execute()
                 update_user_balance(email, refund_amount)
                 supabase.table("WebsiteOrders").update({"refund_amount": refund_amount, "status": "Refunded"}).eq("id", order.get("id")).execute()
-                handle_referral_and_bonus(refund_amount, add=False)
+                handle_referral_and_bonus(email, refund_amount, add=False)
                 notify_supplier("♻️ Completed → Refunded", refund_amount=refund_amount, done_qty=0)
-                safe_send(SUPPLIER_GROUP_ID, f"🔁 Refunded ${refund_amount:.4f} to {escape_html(str(email))} for order {escape_html(str(order.get('id')))} (remain {escape_html(str(remain))})", parse_mode="HTML")
 
         elif new in ("partial", "canceled", "cancelled") and old not in ("completed", "partial", "canceled", "cancelled"):
             done_qty = max(0, qty - remain)
@@ -787,7 +856,7 @@ def adjust_service_qty_on_status_change(order, old_status, new_status):
                 update_user_balance(email, refund_amount)
                 supabase.table("WebsiteOrders").update({"refund_amount": refund_amount, "status": "Refunded"}).eq("id", order.get("id")).execute()
                 notify_supplier("💸 Partial/Canceled Order", refund_amount=refund_amount, spend_amount=spend_amount, done_qty=done_qty)
-                safe_send(SUPPLIER_GROUP_ID, f"💸 {escape_html(str(email))} refunded ${refund_amount:.4f} for {escape_html(str(service_name))} (remain {escape_html(str(remain))})", parse_mode="HTML")
+
     except Exception as e:
         print("adjust_service_qty_on_status_change error:", e)
         traceback.print_exc()
@@ -1068,5 +1137,6 @@ if __name__ == "__main__":
         app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
     except (KeyboardInterrupt, SystemExit):
         pass
+
 
 
