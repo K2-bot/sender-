@@ -537,7 +537,6 @@ def send_to_smmgen(order):
         # ❌ Request Error -> Mark as Canceled
         safe_execute(lambda: supabase.table("WebsiteOrders").update({
             "status": "Canceled",
-            "reason": str(e)
         }).eq("id", order["id"]).execute())
 
         safe_send(
@@ -553,7 +552,6 @@ def send_to_smmgen(order):
         # ⚠️ Response Error -> Mark as Canceled
         safe_execute(lambda: supabase.table("WebsiteOrders").update({
             "status": "Canceled",
-            "reason": json.dumps(data, ensure_ascii=False)
         }).eq("id", order["id"]).execute())
 
         safe_send(
