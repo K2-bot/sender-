@@ -534,22 +534,20 @@ def send_to_smmgen(order):
         r = safe_request("POST", SMMGEN_URL, data=payload, timeout=20)
         data = r.json()
     except Exception as e:
-        error_text = f"❌ SMMGEN API Request Failed\n\n🆔 {order.get('id')}\n📧 {order.get('email')}\n💬 Error: {e}"
-        safe_send(SUPPLIER_GROUP_ID, error_text)
+        safe_send(
+            SUPPLIER_GROUP_ID,
+            f"❌ SMMGEN API Request Failed\n\n🆔 {order.get('id')}\n📧 {order.get('email')}\n💬 Error: {e}"
+        )
         print("send_to_smmgen request error:", e)
         return {"success": False, "error": str(e)}
 
     if isinstance(data, dict) and "order" in data:
         return {"success": True, "order_id": data["order"]}
     else:
-        # Unexpected response
-        error_text = (
-            f"⚠️ SMMGEN API Response Error\n\n"
-            f"🆔 {order.get('id')}\n"
-            f"📧 {order.get('email')}\n"
-            f"💬 Response: {json.dumps(data, ensure_ascii=False)}"
+        safe_send(
+            SUPPLIER_GROUP_ID,
+            f"⚠️ SMMGEN API Response Error\n\n🆔 {order.get('id')}\n📧 {order.get('email')}\n💬 Response: {json.dumps(data, ensure_ascii=False)}"
         )
-        safe_send(SUPPLIER_GROUP_ID, error_text)
         return {"success": False, "error": data}
 
 
@@ -565,7 +563,6 @@ def check_new_orders_loop():
                     result = send_to_smmgen(o)
 
                     if result.get("success"):
-                        # Update order to processing
                         safe_execute(lambda: supabase.table("WebsiteOrders").update({
                             "status": "Processing",
                             "supplier_order_id": str(result["order_id"])
@@ -582,16 +579,6 @@ def check_new_orders_loop():
                             f"✅ Status: Processing\n"
                         )
                         safe_send(SUPPLIER_GROUP_ID, msg, parse_mode="HTML")
-
-                    else:
-                        # API failed
-                        error_text = (
-                            f"❌ Failed to send order to SMMGEN\n\n"
-                            f"🆔 {escape_html(str(o.get('id')))}\n"
-                            f"📧 {escape_html(str(o.get('email')))}\n"
-                            f"💬 Error: {escape_html(str(result.get('error')))}"
-                        )
-                        safe_send(SUPPLIER_GROUP_ID, error_text, parse_mode="HTML")
 
                 elif o.get("supplier_name") == "k2boost":
                     msg = (
@@ -612,16 +599,9 @@ def check_new_orders_loop():
                     )
 
                     safe_send(K2BOOST_GROUP_ID, msg, parse_mode="HTML")
-
-                    safe_execute(lambda: supabase.table("WebsiteOrders")
-                        .update({"status": "Processing"})
-                        .eq("id", o["id"])
-                        .execute()
-                    )
-
-        except Exception as e:
-            error_text = f"⚠️ Error checking WebsiteOrders: {e}"
-            safe_send(SUPPLIER_GROUP_ID, error_text)
+                    safe_execute(lambda: supabase.table("WebsiteOrders").update({"status": "Processing"}).eq("id", o["id"]).execute())
+                    except Exception as e:
+            safe_send(SUPPLIER_GROUP_ID, f"⚠️ Error checking WebsiteOrders: {e}")
             print("check_new_orders_loop error:", e)
 
         time.sleep(3)
