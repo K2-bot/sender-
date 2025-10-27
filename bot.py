@@ -514,7 +514,11 @@ def use_verifypayment_cmd(message):
 # WEBSITE ORDERS + SMMGEN
 # ---------------------------
 
+import time
+import json
+
 def send_to_smmgen(order):
+    """Send order to SMMGEN API"""
     payload = {
         "key": SMMGEN_API_KEY,
         "action": "add",
@@ -522,33 +526,51 @@ def send_to_smmgen(order):
         "link": order.get("link"),
         "quantity": order.get("quantity")
     }
+
     if order.get("comments"):
         payload["comments"] = ",".join(order["comments"])
+
     try:
         r = safe_request("POST", SMMGEN_URL, data=payload, timeout=20)
         data = r.json()
     except Exception as e:
+        error_text = f"❌ SMMGEN API Request Failed\n\n🆔 {order.get('id')}\n📧 {order.get('email')}\n💬 Error: {e}"
+        safe_send(SUPPLIER_GROUP_ID, error_text)
         print("send_to_smmgen request error:", e)
         return {"success": False, "error": str(e)}
+
     if isinstance(data, dict) and "order" in data:
         return {"success": True, "order_id": data["order"]}
     else:
+        # Unexpected response
+        error_text = (
+            f"⚠️ SMMGEN API Response Error\n\n"
+            f"🆔 {order.get('id')}\n"
+            f"📧 {order.get('email')}\n"
+            f"💬 Response: {json.dumps(data, ensure_ascii=False)}"
+        )
+        safe_send(SUPPLIER_GROUP_ID, error_text)
         return {"success": False, "error": data}
 
 
 def check_new_orders_loop():
+    """Check WebsiteOrders table for new pending orders"""
     while True:
         try:
             res = safe_execute(lambda: supabase.table("WebsiteOrders").select("*").eq("status", "Pending").execute())
             orders = res.data or []
+
             for o in orders:
                 if o.get("supplier_name") == "smmgen":
                     result = send_to_smmgen(o)
+
                     if result.get("success"):
+                        # Update order to processing
                         safe_execute(lambda: supabase.table("WebsiteOrders").update({
                             "status": "Processing",
                             "supplier_order_id": str(result["order_id"])
                         }).eq("id", o["id"]).execute())
+
                         msg = (
                             "🚀 New Order to SMMGEN\n\n"
                             f"🆔 {escape_html(str(o.get('id')))}\n"
@@ -556,10 +578,21 @@ def check_new_orders_loop():
                             f"🔢 Quantity: {escape_html(str(o.get('quantity')))}\n"
                             f"🔗 Link: {escape_html(str(o.get('link')))}\n"
                             f"👤 Email: {escape_html(str(o.get('email')))}\n"
-                            f"👤 Order Id: {escape_html(str(result['order_id']))}\n"
+                            f"📋 Supplier Order ID: {escape_html(str(result['order_id']))}\n"
                             f"✅ Status: Processing\n"
                         )
                         safe_send(SUPPLIER_GROUP_ID, msg, parse_mode="HTML")
+
+                    else:
+                        # API failed
+                        error_text = (
+                            f"❌ Failed to send order to SMMGEN\n\n"
+                            f"🆔 {escape_html(str(o.get('id')))}\n"
+                            f"📧 {escape_html(str(o.get('email')))}\n"
+                            f"💬 Error: {escape_html(str(result.get('error')))}"
+                        )
+                        safe_send(SUPPLIER_GROUP_ID, error_text, parse_mode="HTML")
+
                 elif o.get("supplier_name") == "k2boost":
                     msg = (
                         "⚡️ New Order to K2BOOST\n\n"
@@ -577,11 +610,20 @@ def check_new_orders_loop():
                         f"/D {escape_html(str(o.get('id')))}\n"
                         f"/F {escape_html(str(o.get('id')))}\n"
                     )
-    
+
                     safe_send(K2BOOST_GROUP_ID, msg, parse_mode="HTML")
-                    safe_execute(lambda: supabase.table("WebsiteOrders").update({"status": "Processing"}).eq("id", o["id"]).execute())
+
+                    safe_execute(lambda: supabase.table("WebsiteOrders")
+                        .update({"status": "Processing"})
+                        .eq("id", o["id"])
+                        .execute()
+                    )
+
         except Exception as e:
-              safe_send(SUPPLIER_GROUP_ID, msg, parse_mode="HTML")
+            error_text = f"⚠️ Error checking WebsiteOrders: {e}"
+            safe_send(SUPPLIER_GROUP_ID, error_text)
+            print("check_new_orders_loop error:", e)
+
         time.sleep(3)
 
 @bot.message_handler(commands=['D'])
