@@ -600,7 +600,7 @@ def check_new_orders_loop():
 
                     safe_send(K2BOOST_GROUP_ID, msg, parse_mode="HTML")
                     safe_execute(lambda: supabase.table("WebsiteOrders").update({"status": "Processing"}).eq("id", o["id"]).execute())
-                    except Exception as e:
+        except Exception as e:
             safe_send(SUPPLIER_GROUP_ID, f"⚠️ Error checking WebsiteOrders: {e}")
             print("check_new_orders_loop error:", e)
 
