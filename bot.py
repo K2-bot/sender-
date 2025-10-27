@@ -318,39 +318,57 @@ def check_affiliate_rows_loop():
 # ---------------------------
 # TRANSACTION HANDLERS
 # ---------------------------
-def safe_send(chat_id, text, parse_mode=None):
-    """Send Telegram message safely and print errors"""
+import traceback
+import time
+import html
+from telebot import TeleBot
+
+# ---------------------------
+# CONFIG
+# ---------------------------
+BOT_TOKEN = "YOUR_BOT_TOKEN"
+GROUP_ID = -1001234567890  # Telegram group numeric ID
+USD_TO_MMK = 4500
+
+bot = TeleBot(BOT_TOKEN)
+
+# ---------------------------
+# HELPERS
+# ---------------------------
+
+def safe_send(chat_id, text, parse_mode="HTML"):
     try:
+        print(f"📩 Sending message to {chat_id}...\n{text}")
         bot.send_message(chat_id, text, parse_mode=parse_mode)
-        print(f"✅ Sent message to {chat_id}")
+        print("✅ Sent successfully")
     except Exception as e:
         print("❌ safe_send error:", e)
         traceback.print_exc()
 
 def safe_execute(func):
-    """Wrap Supabase calls safely"""
     try:
-        return func()
+        res = func()
+        print("✅ Supabase query executed:", res)
+        return res
     except Exception as e:
         print("❌ Supabase error:", e)
         traceback.print_exc()
         return None
 
 def escape_html(text):
-    """Escape HTML characters for Telegram HTML mode"""
-    escape_chars = "&<>"
-    return ''.join(f"&amp;" if c=="&" else f"&lt;" if c=="<" else f"&gt;" if c==">" else c for c in text or "")
+    return html.escape(str(text or ""))
 
 def update_user_balance(email, amount):
-    """Dummy function - replace with your logic"""
     print(f"Updating {email} balance by {amount}")
     return True
 
 def is_admin_chat(chat_id):
-    """Dummy check - replace with your logic"""
-    # For testing, return True
-    return True
-    
+    return True  # For testing
+
+# ---------------------------
+# TRANSACTIONS
+# ---------------------------
+
 def format_unverified_tx_message(tx):
     id_ = tx.get('id')
     email = tx.get('email')
@@ -365,7 +383,7 @@ def format_unverified_tx_message(tx):
         f"💵 Amount USD = {amount:,.2f}\n"
         f"🇲🇲 Amount MMK = {amount * USD_TO_MMK:,.0f}\n"
         f"🧾 Transaction ID = {txid}\n\n"
-        "🛠 Admin Commands:\n"
+        f"🛠 Admin Commands:\n"
         f"/Yes {id_}\n"
         f"/No {id_}"
     )
@@ -378,6 +396,7 @@ def handle_transaction(tx):
         txid = tx.get("transaction_id")
         record_id = tx.get("id")
 
+        # Check VerifyPayment
         vp = safe_execute(lambda: supabase.table("VerifyPayment")
                           .select("*")
                           .eq("method", method)
@@ -390,8 +409,8 @@ def handle_transaction(tx):
             vp_id = vp.data[0]["id"]
             ok = update_user_balance(email, amount)
             if ok:
-                safe_execute(lambda: supabase.table("VerifyPayment").update({"status": "used"}).eq("id", vp_id).execute())
-                safe_execute(lambda: supabase.table("transactions").update({"status": "Accepted"}).eq("id", record_id).execute())
+                safe_execute(lambda: supabase.table("VerifyPayment").update({"status":"used"}).eq("id", vp_id).execute())
+                safe_execute(lambda: supabase.table("transactions").update({"status":"Accepted"}).eq("id", record_id).execute())
                 msg = (
                     f"✅ Auto Top-up Completed\n"
                     f"👤 User = {email}\n"
@@ -401,11 +420,10 @@ def handle_transaction(tx):
                     f"🧾 Transaction ID = {txid}"
                 )
                 safe_send(GROUP_ID, msg)
-            else:
-                print("Could not top-up user balance for", email)
         else:
             safe_execute(lambda: supabase.table("transactions").update({"status": "Unverified"}).eq("id", record_id).execute())
             safe_send(GROUP_ID, format_unverified_tx_message(tx))
+
     except Exception as e:
         print("handle_transaction error:", e)
         traceback.print_exc()
@@ -419,13 +437,17 @@ def check_new_transactions_loop():
                                .order("id")
                                .execute())
             for tx in res.data or []:
-                safe_execute(lambda: supabase.table("transactions").update({"status": "Checking"}).eq("id", tx["id"]).execute())
+                safe_execute(lambda: supabase.table("transactions").update({"status":"Checking"}).eq("id", tx["id"]).execute())
                 handle_transaction(tx)
         except Exception as e:
             print("Transaction loop error:", e)
             traceback.print_exc()
             time.sleep(2)
         time.sleep(5)
+
+# ---------------------------
+# TELEGRAM COMMAND HANDLERS
+# ---
 
 # ---------------------------
 # TELEGRAM COMMAND HANDLERS
