@@ -318,19 +318,7 @@ def check_affiliate_rows_loop():
 # ---------------------------
 # TRANSACTION HANDLERS
 # ---------------------------
-import traceback
-import time
-import html
-from telebot import TeleBot
-
-# ---------------------------
-# CONFIG
-# ---------------------------
-BOT_TOKEN = "YOUR_BOT_TOKEN"
-GROUP_ID = -1001234567890  # Telegram group numeric ID
 USD_TO_MMK = 4500
-
-bot = TeleBot(BOT_TOKEN)
 
 # ---------------------------
 # HELPERS
