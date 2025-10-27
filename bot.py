@@ -534,6 +534,12 @@ def send_to_smmgen(order):
         r = safe_request("POST", SMMGEN_URL, data=payload, timeout=20)
         data = r.json()
     except Exception as e:
+        # ❌ Request Error -> Mark as Canceled
+        safe_execute(lambda: supabase.table("WebsiteOrders").update({
+            "status": "Canceled",
+            "reason": str(e)
+        }).eq("id", order["id"]).execute())
+
         safe_send(
             SUPPLIER_GROUP_ID,
             f"❌ SMMGEN API Request Failed\n\n🆔 {order.get('id')}\n📧 {order.get('email')}\n💬 Error: {e}"
@@ -544,6 +550,12 @@ def send_to_smmgen(order):
     if isinstance(data, dict) and "order" in data:
         return {"success": True, "order_id": data["order"]}
     else:
+        # ⚠️ Response Error -> Mark as Canceled
+        safe_execute(lambda: supabase.table("WebsiteOrders").update({
+            "status": "Canceled",
+            "reason": json.dumps(data, ensure_ascii=False)
+        }).eq("id", order["id"]).execute())
+
         safe_send(
             SUPPLIER_GROUP_ID,
             f"⚠️ SMMGEN API Response Error\n\n🆔 {order.get('id')}\n📧 {order.get('email')}\n💬 Response: {json.dumps(data, ensure_ascii=False)}"
@@ -559,18 +571,22 @@ def check_new_orders_loop():
             orders = res.data or []
 
             for o in orders:
-                if o.get("supplier_name") == "smmgen":
+                supplier = o.get("supplier_name")
+                order_id = o.get("id")
+
+                if supplier == "smmgen":
                     result = send_to_smmgen(o)
 
                     if result.get("success"):
+                        # ✅ Update to Processing when success
                         safe_execute(lambda: supabase.table("WebsiteOrders").update({
                             "status": "Processing",
                             "supplier_order_id": str(result["order_id"])
-                        }).eq("id", o["id"]).execute())
+                        }).eq("id", order_id).execute())
 
                         msg = (
                             "🚀 New Order to SMMGEN\n\n"
-                            f"🆔 {escape_html(str(o.get('id')))}\n"
+                            f"🆔 {escape_html(str(order_id))}\n"
                             f"📦 Service: {escape_html(str(o.get('service')))}\n"
                             f"🔢 Quantity: {escape_html(str(o.get('quantity')))}\n"
                             f"🔗 Link: {escape_html(str(o.get('link')))}\n"
@@ -580,10 +596,10 @@ def check_new_orders_loop():
                         )
                         safe_send(SUPPLIER_GROUP_ID, msg, parse_mode="HTML")
 
-                elif o.get("supplier_name") == "k2boost":
+                elif supplier == "k2boost":
                     msg = (
                         "⚡️ New Order to K2BOOST\n\n"
-                        f"🆔 {escape_html(str(o.get('id')))}\n"
+                        f"🆔 {escape_html(str(order_id))}\n"
                         f"📧 Email = {escape_html(str(o.get('email')))}\n"
                         f"📦 Service: {escape_html(str(o.get('service')))}\n"
                         f"🔢 Quantity: {escape_html(str(o.get('quantity')))}\n"
@@ -594,12 +610,17 @@ def check_new_orders_loop():
                         f"🏷 Supplier: {escape_html(str(o.get('supplier_name')))}\n"
                         f"🕒 Created: {escape_html(str(o.get('created_at')))}\n"
                         f"💬 Used Type: {escape_html(str(o.get('UsedType')))}\n\n"
-                        f"/D {escape_html(str(o.get('id')))}\n"
-                        f"/F {escape_html(str(o.get('id')))}\n"
+                        f"/D {escape_html(str(order_id))}\n"
+                        f"/F {escape_html(str(order_id))}\n"
                     )
 
                     safe_send(K2BOOST_GROUP_ID, msg, parse_mode="HTML")
-                    safe_execute(lambda: supabase.table("WebsiteOrders").update({"status": "Processing"}).eq("id", o["id"]).execute())
+                    safe_execute(lambda: supabase.table("WebsiteOrders")
+                        .update({"status": "Processing"})
+                        .eq("id", order_id)
+                        .execute()
+                    )
+
         except Exception as e:
             safe_send(SUPPLIER_GROUP_ID, f"⚠️ Error checking WebsiteOrders: {e}")
             print("check_new_orders_loop error:", e)
