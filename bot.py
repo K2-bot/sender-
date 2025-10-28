@@ -63,79 +63,6 @@ scheduler = BackgroundScheduler(timezone="UTC")
 # ---------------------------
 # UTIL / HELPERS
 # ---------------------------
-_escape_re = re.compile(r'([_*[\]()~`>#+\-=|{}.!])')
-
-def now_yangon():
-    return datetime.now(TZ)
-
-def iso_now():
-    return datetime.utcnow().isoformat()
-
-def escape_markdown(text: str) -> str:
-    if text is None:
-        return ""
-    return _escape_re.sub(r'\\\1', str(text))
-
-def try_parse_iso(s):
-    try:
-        return dateutil.parser.isoparse(s) if s else None
-    except Exception:
-        return None
-
-def is_transient_exception(e: Exception) -> bool:
-    name = type(e).__name__
-    msg = str(e).lower()
-    if isinstance(e, requests.exceptions.RequestException):
-        return True
-    for k in ("connection reset", "broken pipe", "connection aborted", "timed out", "timeout", "remote protocol error"):
-        if k in msg:
-            return True
-    return False
-
-def safe_execute(func, retries=5, base_delay=0.5, *args, **kwargs):
-    last_exc = None
-    for attempt in range(retries):
-        try:
-            return func(*args, **kwargs)
-        except Exception as e:
-            last_exc = e
-            if is_transient_exception(e):
-                delay = base_delay * (2 ** attempt)
-                print(f"[safe_execute] transient error ({e}), retrying in {delay:.2f}s (attempt {attempt+1}/{retries})")
-                time.sleep(delay)
-                continue
-            else:
-                raise
-    print(f"[safe_execute] operation failed after {retries} attempts: {last_exc}")
-    raise last_exc
-
-def safe_request(method, url, retries=3, timeout=25, **kwargs):
-    last_exc = None
-    for attempt in range(retries):
-        try:
-            r = requests.request(method, url, timeout=timeout, **kwargs)
-            r.raise_for_status()
-            return r
-        except Exception as e:
-            last_exc = e
-            if is_transient_exception(e) and attempt + 1 < retries:
-                delay = 1 + attempt * 2
-                print(f"[safe_request] transient {e}, retrying in {delay}s (attempt {attempt+1}/{retries})")
-                time.sleep(delay)
-                continue
-            else:
-                raise
-    raise last_exc
-
-def safe_send(chat_id, text, parse_mode=None):
-    """Safely send Telegram messages with optional Markdown/HTML formatting"""
-    try:
-        if parse_mode:
-            bot.send_message(chat_id, text, parse_mode=parse_mode)
-        else:
-            bot.send_message(chat_id, text)
-    except Exception as e:
-        print("Telegram send error:", e)
 
 app = Flask(__name__)
 
@@ -979,6 +906,80 @@ def use_verifypayment_cmd(message):
 # ---------------------------
 # WEBSITE ORDERS + SMMGEN
 # ---------------------------
+_escape_re = re.compile(r'([_*[\]()~`>#+\-=|{}.!])')
+
+def now_yangon():
+    return datetime.now(TZ)
+
+def iso_now():
+    return datetime.utcnow().isoformat()
+
+def escape_markdown(text: str) -> str:
+    if text is None:
+        return ""
+    return _escape_re.sub(r'\\\1', str(text))
+
+def try_parse_iso(s):
+    try:
+        return dateutil.parser.isoparse(s) if s else None
+    except Exception:
+        return None
+
+def is_transient_exception(e: Exception) -> bool:
+    name = type(e).__name__
+    msg = str(e).lower()
+    if isinstance(e, requests.exceptions.RequestException):
+        return True
+    for k in ("connection reset", "broken pipe", "connection aborted", "timed out", "timeout", "remote protocol error"):
+        if k in msg:
+            return True
+    return False
+
+def safe_execute(func, retries=5, base_delay=0.5, *args, **kwargs):
+    last_exc = None
+    for attempt in range(retries):
+        try:
+            return func(*args, **kwargs)
+        except Exception as e:
+            last_exc = e
+            if is_transient_exception(e):
+                delay = base_delay * (2 ** attempt)
+                print(f"[safe_execute] transient error ({e}), retrying in {delay:.2f}s (attempt {attempt+1}/{retries})")
+                time.sleep(delay)
+                continue
+            else:
+                raise
+    print(f"[safe_execute] operation failed after {retries} attempts: {last_exc}")
+    raise last_exc
+
+def safe_request(method, url, retries=3, timeout=25, **kwargs):
+    last_exc = None
+    for attempt in range(retries):
+        try:
+            r = requests.request(method, url, timeout=timeout, **kwargs)
+            r.raise_for_status()
+            return r
+        except Exception as e:
+            last_exc = e
+            if is_transient_exception(e) and attempt + 1 < retries:
+                delay = 1 + attempt * 2
+                print(f"[safe_request] transient {e}, retrying in {delay}s (attempt {attempt+1}/{retries})")
+                time.sleep(delay)
+                continue
+            else:
+                raise
+    raise last_exc
+
+def safe_send(chat_id, text, parse_mode=None):
+    """Safely send Telegram messages with optional Markdown/HTML formatting"""
+    try:
+        if parse_mode:
+            bot.send_message(chat_id, text, parse_mode=parse_mode)
+        else:
+            bot.send_message(chat_id, text)
+    except Exception as e:
+        print("Telegram send error:", e)
+
 USD_TO_MMK = 4500  # MMK conversion rate
 
 def safe_send(chat_id, text, parse_mode=None):
