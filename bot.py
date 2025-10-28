@@ -751,13 +751,14 @@ def check_new_orders_loop():
             for o in orders:
                 status = (o.get("status") or "").lower()
                 supplier_order_id = o.get("supplier_order_id")
-                supplier_name = o.get("supplier_name")
+                supplier_name = (o.get("supplier_name") or "").lower()
 
                 if status in ["refunded", "canceled"]:
                     continue
 
                 # ❌ supplier_order_id ရှိပြီးသားဆိုရင် SKIP (SMMGEN case only)
-                if supplier_name == "smmgen" and supplier_order_id:
+                # ✅ အခုက 0 ဖြစ်နေတာကို မဖြစ်စေဖို့ ပြင်ထား
+                if supplier_name == "smmgen" and supplier_order_id not in [None, "", 0, "0"]:
                     continue
 
                 # ✅ smmgen orders
@@ -817,6 +818,7 @@ def check_new_orders_loop():
             print("check_new_orders_loop error:", e)
             traceback.print_exc()
             time.sleep(3)
+
 
 @bot.message_handler(commands=['D'])
 def admin_mark_completed(message):
