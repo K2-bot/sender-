@@ -17,6 +17,551 @@ import json
 import html  # <- You need this at the top
 
 text = "<b>hello</b>"
+escaped = html.escape(text)  # now this works//////////////////
+
+def safe_send(chat_id, text, parse_mode=None):
+    """Safely send a message, splitting it if it's too long."""
+    try:
+        MAX_LEN = 4000
+        if len(text) > MAX_LEN:
+            for i in range(0, len(text), MAX_LEN):
+                bot.send_message(chat_id, text[i:i+MAX_LEN], parse_mode=parse_mode)
+        else:
+            bot.send_message(chat_id, text, parse_mode=parse_mode)
+    except Exception as e:
+        print(f"[ERROR] Sending message failed: {e}")
+
+
+
+# ---------------------------
+# CONFIG
+# ---------------------------
+load_dotenv()
+TZ = ZoneInfo("Asia/Yangon")
+
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+BOT_TOKEN = os.getenv("TELEGRAM_TOKEN")
+NEWS_GROUP_ID = int(os.getenv("NEWS_GROUP_ID", "0"))
+SUPPLIER_GROUP_ID = int(os.getenv("SUPPLIER_GROUP_ID", "0"))
+K2BOOST_GROUP_ID = int(os.getenv("K2BOOST_GROUP_ID", "0"))
+GROUP_ID = int(os.getenv("GROUP_ID", "0"))
+REPORT_GROUP_ID = int(os.getenv("REPORT_GROUP_ID", "0"))
+SMMGEN_API_KEY = os.getenv("SMMGEN_API_KEY")
+SMMGEN_URL = os.getenv("SMMGEN_URL", "https://smmgen.com/api/v2")
+USD_TO_MMK = float(os.getenv("USD_TO_MMK", "4500"))
+
+if not (SUPABASE_URL and SUPABASE_KEY and BOT_TOKEN):
+    raise RuntimeError("Please provide SUPABASE_URL, SUPABASE_KEY and TELEGRAM_TOKEN in .env")
+
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+bot = telebot.TeleBot(BOT_TOKEN, parse_mode="Markdown")
+db_lock = threading.Lock()
+app = Flask(__name__)
+scheduler = BackgroundScheduler(timezone="UTC")
+
+# ---------------------------
+# UTIL / HELPERS
+# ---------------------------
+_escape_re = re.compile(r'([_*[\]()~`>#+\-=|{}.!])')
+
+def now_yangon():
+    return datetime.now(TZ)
+
+def iso_now():
+    return datetime.utcnow().isoformat()
+
+def escape_markdown(text: str) -> str:
+    if text is None:
+        return ""
+    return _escape_re.sub(r'\\\1', str(text))
+
+def try_parse_iso(s):
+    try:
+        return dateutil.parser.isoparse(s) if s else None
+    except Exception:
+        return None
+
+def is_transient_exception(e: Exception) -> bool:
+    name = type(e).__name__
+    msg = str(e).lower()
+    if isinstance(e, requests.exceptions.RequestException):
+        return True
+    for k in ("connection reset", "broken pipe", "connection aborted", "timed out", "timeout", "remote protocol error"):
+        if k in msg:
+            return True
+    return False
+
+def safe_execute(func, retries=5, base_delay=0.5, *args, **kwargs):
+    last_exc = None
+    for attempt in range(retries):
+        try:
+            return func(*args, **kwargs)
+        except Exception as e:
+            last_exc = e
+            if is_transient_exception(e):
+                delay = base_delay * (2 ** attempt)
+                print(f"[safe_execute] transient error ({e}), retrying in {delay:.2f}s (attempt {attempt+1}/{retries})")
+                time.sleep(delay)
+                continue
+            else:
+                raise
+    print(f"[safe_execute] operation failed after {retries} attempts: {last_exc}")
+    raise last_exc
+
+def safe_request(method, url, retries=3, timeout=25, **kwargs):
+    last_exc = None
+    for attempt in range(retries):
+        try:
+            r = requests.request(method, url, timeout=timeout, **kwargs)
+            r.raise_for_status()
+            return r
+        except Exception as e:
+            last_exc = e
+            if is_transient_exception(e) and attempt + 1 < retries:
+                delay = 1 + attempt * 2
+                print(f"[safe_request] transient {e}, retrying in {delay}s (attempt {attempt+1}/{retries})")
+                time.sleep(delay)
+                continue
+            else:
+                raise
+    raise last_exc
+
+def safe_send(chat_id, text, parse_mode=None):
+    """Safely send Telegram messages with optional Markdown/HTML formatting"""
+    try:
+        if parse_mode:
+            bot.send_message(chat_id, text, parse_mode=parse_mode)
+        else:
+            bot.send_message(chat_id, text)
+    except Exception as e:
+        print("Telegram send error:", e)
+
+app = Flask(__name__)
+
+sent_ids = set()
+
+def poll_supportbox():
+    """Check SupportBox table every 10s for pending tickets"""
+    while True:
+        try:
+            response = supabase.table("SupportBox").select("*").eq("status", "Pending").execute()
+            rows = response.data or []
+
+            for row in rows:
+                id_ = row.get("id")
+                if id_ in sent_ids:
+                    continue
+
+                email = row.get("email", "")
+                subject = row.get("subject", "Other")
+                message = row.get("message", "")
+                order_id = row.get("order_id", "")
+
+                text = (
+                    "📢 New Support Ticket\n"
+                    f"ID - {id_}\n"
+                    f"Email - {email}\n"
+                    f"Subject - {subject}\n"
+                    f"Order ID - {order_id}\n\n"
+                    f"Message:\n{message}\n\n"
+                    "Commands:\n"
+                    f"/Answer {id_} [reply message]\n"
+                    f"/Close {id_}"
+                )
+
+                try:
+                    bot.send_message(NEWS_GROUP_ID, text)
+                    supabase.table("SupportBox").update({"status": "Sent"}).eq("id", id_).execute()
+                    sent_ids.add(id_)
+                    print(f"[SENT] Ticket {id_} sent to group.")
+                except Exception as send_err:
+                    print(f"[ERROR] Sending message failed: {send_err}")
+
+        except Exception as e:
+            print(f"[ERROR] Polling failed: {e}")
+
+        time.sleep(10)
+
+
+@bot.message_handler(commands=['Answer'])
+def handle_answer(message):
+    try:
+        parts = message.text.split(' ', 2)
+        if len(parts) < 3:
+            bot.reply_to(message, "Usage: /Answer ID reply_message")
+            return
+
+        id_ = int(parts[1])
+        reply_text = parts[2]
+
+        supabase.table("SupportBox").update({
+            "reply_text": reply_text,
+            "status": "Replied",
+            "replied_at": "now()",
+            "UserStatus": "Unread"
+        }).eq("id", id_).execute()
+
+        bot.reply_to(message, f"Replied to ticket ID {id_}")
+        print(f"[REPLY] Ticket {id_} answered.")
+
+    except Exception as e:
+        bot.reply_to(message, f"Error: {e}")
+        print(f"[ERROR] /Answer failed: {e}")
+
+
+@bot.message_handler(commands=['Close'])
+def handle_close(message):
+    try:
+        parts = message.text.split(' ', 1)
+        if len(parts) < 2:
+            bot.reply_to(message, "Usage: /Close ID")
+            return
+
+        id_ = int(parts[1])
+
+        supabase.table("SupportBox").update({
+            "status": "Closed",
+            "UserStatus": "Unread"
+        }).eq("id", id_).execute()
+
+        bot.reply_to(message, f"Closed ticket ID {id_}")
+        print(f"[CLOSED] Ticket {id_} closed.")
+
+    except Exception as e:
+        bot.reply_to(message, f"Error: {e}")
+        print(f"[ERROR] /Close failed: {e}")
+
+
+
+
+
+
+sent_ids = set()
+
+def update_user_balance(email, amount):
+    """Add USD balance to user"""
+    try:
+        # Get user
+        res = supabase.table("users").select("balance_usd").eq("email", email).execute()
+        if not res.data:
+            print(f"[WARN] User not found: {email}")
+            return False
+
+        current_balance = float(res.data[0]["balance_usd"] or 0)
+        new_balance = current_balance + float(amount)
+
+        supabase.table("users").update({"balance_usd": new_balance}).eq("email", email).execute()
+        print(f"[OK] Updated balance for {email}: {current_balance} → {new_balance}")
+        return True
+    except Exception as e:
+        print(f"[ERROR] Balance update failed: {e}")
+        return False
+
+
+def poll_affiliate():
+    """Poll affiliate table for Pending entries every 10s"""
+    while True:
+        try:
+            res = supabase.table("affiliate").select("*").eq("status", "Pending").execute()
+            rows = res.data or []
+
+            for row in rows:
+                aff_id = row["id"]
+                if aff_id in sent_ids:
+                    continue
+
+                email = row["email"]
+                amount = float(row["amount"])
+                method = row["method"]
+                phone_id = row.get("phone_id") or "-"
+                name = row.get("name") or "-"
+
+                # First mark as processing
+                supabase.table("affiliate").update({"status": "Processing"}).eq("id", aff_id).execute()
+
+                if method.lower() == "topup":
+                    ok = update_user_balance(email, amount)
+                    if ok:
+                        supabase.table("affiliate").update({"status": "Accepted"}).eq("id", aff_id).execute()
+
+                        msg = (
+                            "💰 Affiliate Topup\n\n"
+                            f"🆔 ID = {aff_id}\n"
+                            f"📧 Email = {email}\n"
+                            f"💳 Method = {method}\n"
+                            f"💵 Amount USD = {amount}\n"
+                            f"🇲🇲 Amount MMK = {amount * USD_TO_MMK:,.0f}"
+                        )
+                        bot.send_message(GROUP_ID, msg)
+                        print(f"[TopUp] Accepted ID {aff_id} for {email}")
+                else:
+                    msg = (
+                        "🆕 New Affiliate Request\n\n"
+                        f"🆔 ID = {aff_id}\n"
+                        f"📧 Email = {email}\n"
+                        f"💰 Amount = {amount}\n"
+                        f"💳 Method = {method}\n"
+                        f"📱 Phone ID = {phone_id}\n"
+                        f"👤 Name = {name}\n\n"
+                        f"🇲🇲 Amount MMK = {amount * USD_TO_MMK:,.0f}\n"
+                        "🛠 Admin Actions:\n"
+                        f"/Accept {aff_id}\n"
+                        f"/Failed {aff_id}"
+                    )
+                    bot.send_message(GROUP_ID, msg)
+                    print(f"[Request] New Affiliate Request ID {aff_id}")
+
+                sent_ids.add(aff_id)
+
+        except Exception as e:
+            print(f"[ERROR] Polling affiliate failed: {e}")
+
+        time.sleep(10)
+
+
+@bot.message_handler(commands=['Accept'])
+def handle_accept(message):
+    try:
+        parts = message.text.split(' ', 1)
+        if len(parts) < 2:
+            bot.reply_to(message, "Usage: /Accept ID")
+            return
+
+        aff_id = int(parts[1])
+        res = supabase.table("affiliate").select("*").eq("id", aff_id).execute()
+        if not res.data:
+            bot.reply_to(message, "Affiliate ID not found.")
+            return
+        row = res.data[0]
+        email = row["email"]
+        amount = float(row["amount"])
+
+        ok = update_user_balance(email, amount)
+        if ok:
+            supabase.table("affiliate").update({"status": "Accepted"}).eq("id", aff_id).execute()
+            bot.reply_to(message, f"✅ Accepted ID {aff_id} ({email})")
+            print(f"[Accept] ID {aff_id} accepted for {email}")
+        else:
+            bot.reply_to(message, f"⚠️ Balance update failed for {email}")
+
+    except Exception as e:
+        bot.reply_to(message, f"Error: {e}")
+        print(f"[ERROR] /Accept failed: {e}")
+
+
+@bot.message_handler(commands=['Failed'])
+def handle_failed(message):
+    try:
+        parts = message.text.split(' ', 1)
+        if len(parts) < 2:
+            bot.reply_to(message, "Usage: /Failed ID")
+            return
+
+        aff_id = int(parts[1])
+        supabase.table("affiliate").update({"status": "Failed"}).eq("id", aff_id).execute()
+        bot.reply_to(message, f"❌ Failed ID {aff_id}")
+        print(f"[Fail] ID {aff_id} marked as failed.")
+
+    except Exception as e:
+        bot.reply_to(message, f"Error: {e}")
+        print(f"[ERROR] /Failed failed: {e}")
+
+
+
+USD_TO_MMK = 4500
+POLL_INTERVAL = 10  # seconds
+
+# =================================
+# INITIAL SETUP
+# ================================
+processed_ids = set()
+
+
+# =================================
+# FUNCTIONS
+# =================================
+def update_transaction_status(tx_id, status):
+    supabase.table("transactions").update({"status": status}).eq("id", tx_id).execute()
+
+
+def update_verify_status(txid, status):
+    supabase.table("VerifyPayment").update({"status": status}).eq("transaction_id", txid).execute()
+
+
+def update_user_balance(email, amount):
+    user = supabase.table("users").select("balance_usd").eq("email", email).single().execute()
+    if user.data:
+        old_balance = float(user.data["balance_usd"])
+        new_balance = old_balance + float(amount)
+        supabase.table("users").update({"balance_usd": new_balance}).eq("email", email).execute()
+        return True
+    return False
+
+
+# =================================
+# POLLING LOOP
+# =================================
+def poll_transactions():
+    while True:
+        try:
+            result = supabase.table("transactions").select("*").eq("status", "Pending").execute()
+            transactions = result.data or []
+
+            for tx in transactions:
+                txid = tx.get("transaction_id")
+                email = tx.get("email")
+                method = tx.get("method")
+                amount = float(tx.get("amount") or 0)
+                tx_db_id = tx.get("id")
+
+                if tx_db_id in processed_ids:
+                    continue
+
+                # Mark as processing
+                update_transaction_status(tx_db_id, "Processing")
+                processed_ids.add(tx_db_id)
+
+                # Find matching VerifyPayment
+                verify = (
+                    supabase.table("VerifyPayment")
+                    .select("*")
+                    .eq("transaction_id", txid)
+                    .eq("method", method)
+                    .eq("status", "unused")
+                    .execute()
+                )
+
+                match = None
+                if verify.data:
+                    for v in verify.data:
+                        if abs(float(v["amount_usd"]) - amount) < 0.0001:
+                            match = v
+                            break
+
+                # CASE 1: Auto Verified
+                if match:
+                    update_verify_status(txid, "used")
+                    update_user_balance(email, amount)
+                    update_transaction_status(tx_db_id, "Accepted")
+
+                    mmk = amount * USD_TO_MMK
+                    message = (
+                        "✅ Auto Top-up Completed\n\n"
+                        + f"👤 User: {email}\n"
+                        + f"💳 Method: {method}\n"
+                        + f"💰 Amount USD: {amount}\n"
+                        + f"🇲🇲 Amount MMK: {mmk:,.0f}\n"
+                        + f"🧾 Transaction ID: {txid}"
+                    )
+                    bot.send_message(GROUP_ID, message)
+
+                # CASE 2: Unverified
+                else:
+                    mmk = amount * USD_TO_MMK
+                    message = (
+                        "🆕 New Unverified Transaction\n\n"
+                        + f"🆔 ID: {tx_db_id}\n"
+                        + f"📧 Email: {email}\n"
+                        + f"💳 Method: {method}\n"
+                        + f"💵 Amount USD: {amount}\n"
+                        + f"🇲🇲 Amount MMK: {mmk:,.0f}\n"
+                        + f"🧾 Transaction ID: {txid}\n\n"
+                        + "🛠 Admin Commands:\n"
+                        + f"/Yes {tx_db_id}\n"
+                        + f"/No {tx_db_id}"
+                    )
+                    bot.send_message(GROUP_ID, message)
+
+        except Exception as e:
+            print("Polling Error:", e)
+
+        time.sleep(POLL_INTERVAL)
+
+
+# =================================
+# ADMIN COMMANDS
+# =================================
+@bot.message_handler(commands=["Yes"])
+def yes_command(message):
+    try:
+        parts = message.text.split()
+        if len(parts) < 2:
+            bot.reply_to(message, "Usage: /Yes ID")
+            return
+
+        tx_id = int(parts[1])
+        data = supabase.table("transactions").select("*").eq("id", tx_id).single().execute().data
+
+        if not data:
+            bot.reply_to(message, "Transaction not found.")
+            return
+
+        email = data["email"]
+        amount = float(data["amount"])
+        update_user_balance(email, amount)
+        update_transaction_status(tx_id, "Accepted")
+
+        bot.reply_to(message, f"Transaction #{tx_id} marked as Accepted and balance updated.")
+    except Exception as e:
+        bot.reply_to(message, f"Error: {e}")
+
+
+@bot.message_handler(commands=["No"])
+def no_command(message):
+    try:
+        parts = message.text.split()
+        if len(parts) < 2:
+            bot.reply_to(message, "Usage: /No ID")
+            return
+
+        tx_id = int(parts[1])
+        update_transaction_status(tx_id, "Failed")
+        bot.reply_to(message, f"Transaction #{tx_id} marked as Failed.")
+    except Exception as e:
+        bot.reply_to(message, f"Error: {e}")
+
+
+@bot.message_handler(commands=["Use"])
+def use_command(message):
+    try:
+        parts = message.text.split()
+        if len(parts) < 2:
+            bot.reply_to(message, "Usage: /Use TransactionID")
+            return
+
+        txid = parts[1]
+        update_verify_status(txid, "used")
+        bot.reply_to(message, f"VerifyPayment {txid} marked as used.")
+    except Exception as e:
+        bot.reply_to(message, f"Error: {e}")
+
+
+# =================================
+# MAIN
+# ===============================
+
+# === Helper functions ===
+
+import os
+import re
+import time
+import threading
+import requests
+import traceback
+import pandas as pd
+import dateutil.parser
+from datetime import datetime
+from zoneinfo import ZoneInfo
+from flask import Flask, jsonify, request
+from dotenv import load_dotenv
+from supabase import create_client, Client
+import telebot
+from apscheduler.schedulers.background import BackgroundScheduler
+import json
+import html  # <- You need this at the top
+
+text = "<b>hello</b>"
 escaped = html.escape(text)  # now this works
 
 # ---------------------------
@@ -143,212 +688,6 @@ def update_user_balance(email, amount):
 # ---------------------------
 # SUPPORT BOX
 # ---------------------------
-last_checked_support = None
-
-def escape_md2(text):
-    escape_chars = r"_*[]()~`>#+-=|{}.!\\"  # used for MarkdownV2 escaping of content
-    return ''.join(f'\\{c}' if c in escape_chars else c for c in (text or ""))
-
-def send_news_to_group(row):
-    id_ = escape_md2(str(row.get("id") or ""))
-    email = escape_md2(str(row.get("email") or ""))
-    subject = escape_md2(str(row.get("subject") or ""))
-    order_id = escape_md2(str(row.get("order_id") or ""))
-    message = escape_md2(str(row.get("message") or ""))
-
-    msg = (
-        "📢 *New Support Ticket*\n"
-        f"📦 ID - {id_}\n"
-        f"📧 Email - {email}\n"
-        f"📝 Subject - {subject}\n"
-        f"🆔 Order ID - {order_id}\n\n"
-        "💬 Message:\n"
-        f"{message}\n\n"
-        "Commands:\n"
-        f"/Answer {id_} [reply message]\n"
-        f"/Close {id_}"
-    )
-    safe_send(NEWS_GROUP_ID, msg)
-
-def update_support_status(id, status, reply_message=None):
-    updates = {"status": status}
-    if reply_message:
-        updates["reply_text"] = reply_message  # match your table
-        updates["replied_at"] = datetime.utcnow().isoformat()
-    try:
-        safe_execute(lambda: supabase.table("SupportBox")
-                     .update(updates)
-                     .eq("id", id)
-                     .execute())
-    except Exception as e:
-        print("Support update error:", e)
-
-
-@bot.message_handler(commands=['Answer'])
-def handle_answer(message):
-    try:
-        parts = message.text.split(maxsplit=2)
-        if len(parts) < 3:
-            return bot.reply_to(message, "❌ Usage: /Answer ID Reply Message")
-        id = int(parts[1])
-        reply_text = parts[2]
-        update_support_status(id, "Answered", reply_text)
-        bot.reply_to(message, f"✅ Support ID {id} marked as Answered.")
-    except Exception as e:
-        bot.reply_to(message, f"⚠️ Error: {e}")
-
-@bot.message_handler(commands=['Close'])
-def handle_close(message):
-    try:
-        parts = message.text.split(maxsplit=1)
-        if len(parts) < 2:
-            return bot.reply_to(message, "❌ Usage: /Close ID")
-        id = int(parts[1])
-        update_support_status(id, "Closed")
-        bot.reply_to(message, f"✅ Support ID {id} Closed.")
-    except Exception as e:
-        bot.reply_to(message, f"⚠️ Error: {e}")
-
-def poll_supportbox_loop():
-    global last_checked_support
-    while True:
-        try:
-            res = safe_execute(lambda: supabase.table("SupportBox").select("*").order("created_at").execute())
-            rows = res.data or []
-            for row in rows:
-                created = try_parse_iso(row.get("created_at")) or datetime.utcnow()
-                if (not last_checked_support or created > last_checked_support) and row.get("status") == "Pending":
-                    send_news_to_group(row)
-                    last_checked_support = created
-        except Exception as e:
-            print("SupportBox polling error:", e)
-            traceback.print_exc()
-            time.sleep(2)
-        time.sleep(5)
-
-def safe_send(chat_id, text, parse_mode=None):
-    """Send Telegram message safely and print errors"""
-    try:
-        bot.send_message(chat_id, text, parse_mode=parse_mode)
-        print(f"✅ Sent message to {chat_id}")
-    except Exception as e:
-        print("❌ safe_send error:", e)
-        traceback.print_exc()
-
-def safe_execute(func):
-    """Wrap Supabase calls safely"""
-    try:
-        return func()
-    except Exception as e:
-        print("❌ Supabase error:", e)
-        traceback.print_exc()
-        return None
-
-def escape_html(text):
-    """Escape HTML characters for Telegram HTML mode"""
-    escape_chars = "&<>"
-    return ''.join(f"&amp;" if c=="&" else f"&lt;" if c=="<" else f"&gt;" if c==">" else c for c in text or "")
-
-def update_user_balance(email, amount):
-    """Dummy function - replace with your logic"""
-    print(f"Updating {email} balance by {amount}")
-    return True
-
-def is_admin_chat(chat_id):
-    """Dummy check - replace with your logic"""
-    # For testing, return True
-    return True
-
-# ---------------------------
-# AFFILIATE HANDLERS
-# ---------------------------
-
-def handle_affiliate(row):
-    email = row.get("email")
-    method = row.get("method")
-    amount = float(row.get("amount") or 0)
-    aff_id = row.get("id")
-    phone_id = row.get("phone_id", "N/A")
-    name = row.get("name", "N/A")
-
-    if method and method.lower() == "topup":
-        ok = update_user_balance(email, amount)
-        if ok:
-            safe_execute(lambda: supabase.table("affiliate").update({"status": "Accepted"}).eq("id", aff_id).execute())
-            msg = (
-                "💰 Affiliate Topup\n\n"
-                f"🆔 ID = {escape_html(str(aff_id))}\n"
-                f"📧 Email = {escape_html(email)}\n"
-                f"💳 Method = {escape_html(method)}\n"
-                f"💵 Amount USD = {amount}\n"
-                f"🇲🇲 Amount MMK = {amount * USD_TO_MMK:,.0f}"
-            )
-            safe_send(GROUP_ID, msg, parse_mode="HTML")
-        return
-
-    msg = (
-        "🆕 New Affiliate Request\n\n"
-        f"🆔 ID = {escape_html(str(aff_id))}\n"
-        f"📧 Email = {escape_html(email)}\n"
-        f"💰 Amount = {amount}\n"
-        f"💳 Method = {escape_html(str(method))}\n"
-        f"📱 Phone ID = {escape_html(str(phone_id))}\n"
-        f"👤 Name = {escape_html(str(name))}\n\n"
-        f"🇲🇲 Amount MMK = {amount * USD_TO_MMK:,.0f}\n"
-        "🛠 <b>Admin Actions:</b>\n"
-        f"/Accept {aff_id}\n"
-        f"/Failed {aff_id}"
-    )
-    safe_send(GROUP_ID, msg, parse_mode="HTML")
-
-def check_affiliate_rows_loop():
-    last_id = 0
-    while True:
-        try:
-            res = safe_execute(lambda: supabase.table("affiliate")
-                               .select("*")
-                               .eq("status", "Pending")
-                               .gt("id", last_id)
-                               .order("id")
-                               .execute())
-            for row in res.data or []:
-                last_id = row["id"]
-                handle_affiliate(row)
-        except Exception as e:
-            print("Affiliate loop error:", e)
-            traceback.print_exc()
-            time.sleep(2)
-        time.sleep(5)
-
-@bot.message_handler(commands=['Accept'])
-def accept_aff_cmd(message):
-    if not is_admin_chat(message.chat.id):
-        return bot.reply_to(message, "❌ You are not authorized to use this command.")
-    try:
-        aff_id = int(message.text.split()[1])
-        row_res = safe_execute(lambda: supabase.table("affiliate").select("*").eq("id", aff_id).execute())
-        row = row_res.data[0] if row_res and row_res.data else None
-        if not row:
-            return bot.reply_to(message, "Affiliate not found.")
-        ok = update_user_balance(row.get("email"), float(row.get("amount") or 0))
-        if ok:
-            safe_execute(lambda: supabase.table("affiliate").update({"status":"Accepted"}).eq("id", aff_id).execute())
-            safe_send(GROUP_ID, f"✅ Affiliate #{aff_id} Accepted", parse_mode="HTML")
-        else:
-            bot.reply_to(message, "⚠️ Could not update balance.")
-    except Exception as e:
-        bot.reply_to(message, f"⚠️ Error: {e}")
-
-@bot.message_handler(commands=['Failed'])
-def failed_aff_cmd(message):
-    if not is_admin_chat(message.chat.id):
-        return bot.reply_to(message, "❌ You are not authorized to use this command.")
-    try:
-        aff_id = int(message.text.split()[1])
-        safe_execute(lambda: supabase.table("affiliate").update({"status":"Failed"}).eq("id", aff_id).execute())
-        safe_send(GROUP_ID, f"❌ Affiliate #{aff_id} Failed", parse_mode="HTML")
-    except Exception as e:
-        bot.reply_to(message, f"⚠️ Error: {e}")
 
 # ---------------------------
 # TRANSACTION HANDLERS
@@ -636,9 +975,6 @@ def use_verifypayment_cmd(message):
 
 
 # ---------------------------
-
-
-        
 
 # ---------------------------
 # WEBSITE ORDERS + SMMGEN
@@ -1032,7 +1368,8 @@ def smmgen_status_loop():
 
 # ---------------------------
 # PROFIT CALCULATION
-# ---------------------------
+
+
 def calculate_profit():
     try:
         # Fetch services with sold quantities
@@ -1167,85 +1504,34 @@ def check_smmgen_service_rates():
         print("check_smmgen_service_rates error:", e)
         traceback.print_exc()
 
+
+
+if __name__ == "__main__":
+    threading.Thread(target=poll_transactions, daemon=True).start()
+    threading.Thread(target=poll_affiliate, daemon=True).start()
+    threading.Thread(target=poll_supportbox, daemon=True).start()
+    threading.Thread(target=check_new_orders_loop, daemon=True).start()
+    threading.Thread(target=smmgen_status_loop, daemon=True).start()
+     
+
+    # Run Flask server on background
+    threading.Thread(target=lambda: app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000))), daemon=True).start()
+
+    # Start Telegram bot
+    bot.polling(none_stop=True)
+
+
 # ---------------------------
 # FLASK ROUTES (web service triggers)
 # ---------------------------
-@app.route("/", methods=["GET"])
-def health():
-    return jsonify({"status": "running", "time": now_yangon().isoformat()})
-
-@app.route("/run_all", methods=["GET"])
-def run_all_once():
-    try:
-        threading.Thread(target=poll_supportbox_loop, daemon=True).start()
-        threading.Thread(target=check_affiliate_rows_loop, daemon=True).start()
-        threading.Thread(target=check_new_transactions_loop, daemon=True).start()
-        threading.Thread(target=check_new_orders_loop, daemon=True).start()
-        threading.Thread(target=smmgen_status_loop, daemon=True).start()
-        threading.Thread(target=calculate_profit, daemon=True).start()
-        return jsonify({"status": "started", "note": "background tasks triggered"}), 200
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-@app.route("/trigger/supportbox", methods=["GET"])
-def trigger_supportbox():
-    threading.Thread(target=poll_supportbox_loop, daemon=True).start()
-    return jsonify({"status": "supportbox triggered"}), 200
-
-@app.route("/trigger/affiliates", methods=["GET"])
-def trigger_affiliates():
-    threading.Thread(target=check_affiliate_rows_loop, daemon=True).start()
-    return jsonify({"status": "affiliates triggered"}), 200
-
-@app.route("/trigger/transactions", methods=["GET"])
-def trigger_transactions():
-    threading.Thread(target=check_new_transactions_loop, daemon=True).start()
-    return jsonify({"status": "transactions triggered"}), 200
-
-@app.route("/trigger/orders", methods=["GET"])
-def trigger_orders():
-    threading.Thread(target=check_new_orders_loop, daemon=True).start()
-    return jsonify({"status": "orders triggered"}), 200
-
-@app.route("/trigger/smmgen-status", methods=["GET"])
-def trigger_smmgen_status():
-    threading.Thread(target=smmgen_status_loop, daemon=True).start()
-    return jsonify({"status": "smmgen status triggered"}), 200
-
-@app.route("/trigger/profit", methods=["GET"])
-def trigger_profit():
-    threading.Thread(target=calculate_profit, daemon=True).start()
-    return jsonify({"status": "profit triggered"}), 200
-
-# ---------------------------
-# STARTUP
-# ---------------------------
-def start_bot_polling():
-    bot.infinity_polling()
-
-def start_background_threads():
-    threading.Thread(target=poll_supportbox_loop, daemon=True).start()
-    threading.Thread(target=check_affiliate_rows_loop, daemon=True).start()
-    threading.Thread(target=check_new_transactions_loop, daemon=True).start()
-    threading.Thread(target=check_new_orders_loop, daemon=True).start()
-    threading.Thread(target=smmgen_status_loop, daemon=True).start()
 
 if __name__ == "__main__":
     try:
-        start_background_threads()
-        threading.Thread(target=start_bot_polling, daemon=True).start()
         scheduler.add_job(calculate_profit, 'cron', hour=8, minute=0)              # 08:00 UTC == 14:30 Yangon (approx)
         scheduler.add_job(check_smmgen_service_rates, 'cron', hour=8, minute=30)   # run rates check daily ~14:30 Yangon
         scheduler.start()
         app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
     except (KeyboardInterrupt, SystemExit):
         pass
-
-
-
-
-
-
-
 
 
