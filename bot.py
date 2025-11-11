@@ -1,4 +1,4 @@
-import os
+CONFIGIGrt os
 import re
 import time
 import threading
@@ -543,11 +543,15 @@ def send_to_smmgen(order):
         "action": "add",
         "service": order.get("supplier_service_id"),
         "link": order.get("link"),
-        "quantity": order.get("quantity"),
     }
 
+    # 🧩 Custom Comments အတွက် logic
     if order.get("comments"):
-        payload["comments"] = ",".join(order["comments"])
+        # comments array ကို newline-separated string ပြောင်း
+        payload["comments"] = "\n".join(order["comments"])
+    else:
+        # comments မရှိရင်တော့ quantity သုံး
+        payload["quantity"] = order.get("quantity")
 
     try:
         r = safe_request("POST", SMMGEN_URL, data=payload, timeout=20)
@@ -555,7 +559,7 @@ def send_to_smmgen(order):
     except Exception as e:
         print("send_to_smmgen request error:", e)
 
-        # Mark order as canceled + default supplier_order_id
+        # Mark as canceled
         safe_execute(
             lambda: supabase.table("WebsiteOrders")
             .update({
@@ -576,22 +580,21 @@ def send_to_smmgen(order):
         safe_send(
             SUPPLIER_GROUP_ID,
             f"❌ SMMGEN API Request Failed\n"
-            f"ID: {order.get('id')}\n"
-            f"Email: {order.get('email')}\n"
-            f"Error: {str(e)}",
+            f"🆔 {order.get('id')}\n"
+            f"📧 {order.get('email')}\n"
+            f"⚠️ Error: {str(e)}",
             parse_mode="HTML"
         )
 
         return {"success": False, "error": str(e)}
 
-    # ✅ Handle valid JSON response
+    # ✅ Response check
     if isinstance(data, dict) and "order" in data:
         return {"success": True, "order_id": data["order"]}
-
     else:
         print("send_to_smmgen response error:", data)
 
-        # Mark order as canceled + default supplier_order_id
+        # Update to canceled
         safe_execute(
             lambda: supabase.table("WebsiteOrders")
             .update({
@@ -602,24 +605,21 @@ def send_to_smmgen(order):
             .execute()
         )
 
-        # Adjust quantity
         try:
             adjust_service_qty_on_status_change(order, order.get("status"), "Canceled")
         except Exception as err:
             print("adjust_service_qty_on_status_change error:", err)
 
-        # Notify supplier group
         safe_send(
             SUPPLIER_GROUP_ID,
             f"⚠️ SMMGEN API Response Error\n"
-            f"ID: {order.get('id')}\n"
-            f"Email: {order.get('email')}\n"
-            f"Response: {json.dumps(data, ensure_ascii=False)}",
+            f"🆔 {order.get('id')}\n"
+            f"📧 {order.get('email')}\n"
+            f"📩 Response: {json.dumps(data, ensure_ascii=False)}",
             parse_mode="HTML"
         )
 
         return {"success": False, "error": data}
-
 
 def check_new_orders_loop():
     while True:
